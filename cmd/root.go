@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/simota/yam/internal/parser"
 	"github.com/simota/yam/internal/renderer"
@@ -19,16 +20,18 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "yam [file]",
+	Use:   "yam [path] [file]",
 	Short: "A beautiful YAML renderer for the terminal",
 	Long: `yam renders YAML files with syntax highlighting and tree visualization.
 
 Examples:
-  yam config.yaml          # Render a file
-  cat config.yaml | yam    # Render from stdin
-  yam -i config.yaml       # Interactive TUI mode`,
+  yam config.yaml              # Render a file
+  cat config.yaml | yam        # Render from stdin
+  yam -i config.yaml           # Interactive TUI mode
+  yam '.data.host' config.yaml # Extract value at path
+  yam '.items[0]' config.yaml  # Extract array element`,
 	Version: version,
-	Args:    cobra.MaximumNArgs(1),
+	Args:    cobra.MaximumNArgs(2),
 	RunE:    run,
 }
 
@@ -45,9 +48,28 @@ func init() {
 func run(cmd *cobra.Command, args []string) error {
 	var input io.Reader
 	var filename string
+	var pathQuery string
 
-	if len(args) > 0 {
-		filename = args[0]
+	// Parse arguments: [path] [file] or [file] or nothing
+	// Path starts with '.'
+	switch len(args) {
+	case 2:
+		// yam '.path' file.yaml
+		pathQuery = args[0]
+		filename = args[1]
+	case 1:
+		// Could be path or file
+		if strings.HasPrefix(args[0], ".") {
+			// yam '.path' (with stdin)
+			pathQuery = args[0]
+		} else {
+			// yam file.yaml
+			filename = args[0]
+		}
+	}
+
+	// Set up input source
+	if filename != "" {
 		f, err := os.Open(filename)
 		if err != nil {
 			return fmt.Errorf("failed to open file: %w", err)
@@ -61,7 +83,9 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("no input: provide a file or pipe YAML content")
 		}
 		input = os.Stdin
-		filename = "stdin"
+		if filename == "" {
+			filename = "stdin"
+		}
 	}
 
 	// Parse YAML
@@ -69,6 +93,14 @@ func run(cmd *cobra.Command, args []string) error {
 	root, err := p.Parse(input)
 	if err != nil {
 		return err
+	}
+
+	// Apply path query if specified
+	if pathQuery != "" {
+		root, err = parser.GetByPath(root, pathQuery)
+		if err != nil {
+			return fmt.Errorf("path query failed: %w", err)
+		}
 	}
 
 	// Determine tree style
