@@ -156,3 +156,29 @@ func inferNumberTag(s string) string {
 	}
 	return "!!int"
 }
+
+// ToRawValue converts a YamNode to a plain string value (no decoration)
+// For scalars, returns the value directly
+// For containers, returns JSON representation
+func ToRawValue(node *YamNode) string {
+	if node == nil {
+		return ""
+	}
+
+	// Skip document wrapper
+	if node.Kind() == KindDocument && len(node.Children) > 0 {
+		return ToRawValue(node.Children[0])
+	}
+
+	// For scalars, return the raw value
+	if node.Kind() == KindScalar {
+		return node.Value()
+	}
+
+	// For containers, return compact JSON
+	jsonBytes, err := ToJSON(node, false)
+	if err != nil {
+		return ""
+	}
+	return string(jsonBytes)
+}

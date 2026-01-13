@@ -17,6 +17,7 @@ var (
 	treeStyle   string
 	showTypes   bool
 	outputJSON  bool
+	rawOutput   bool
 	version     = "0.1.0"
 )
 
@@ -32,6 +33,7 @@ Examples:
   yam '.data.host' config.yaml # Extract value at path
   yam '.items[0]' config.yaml  # Extract array element
   yam --json config.yaml       # Output as JSON
+  yam -r '.data.host' config.yaml # Raw value output (no decoration)
   yam data.json                # Render JSON file as tree`,
 	Version: version,
 	Args:    cobra.MaximumNArgs(2),
@@ -47,6 +49,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&treeStyle, "style", "s", "unicode", "Tree style: unicode, ascii, indent")
 	rootCmd.Flags().BoolVarP(&showTypes, "types", "t", false, "Show type annotations")
 	rootCmd.Flags().BoolVarP(&outputJSON, "json", "j", false, "Output as JSON")
+	rootCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output raw value without decoration")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -126,6 +129,13 @@ func run(cmd *cobra.Command, args []string) error {
 	if interactive {
 		// Run TUI
 		return ui.Run(root, filename, style, showTypes)
+	}
+
+	// Raw output mode (for scripting)
+	if rawOutput {
+		output := parser.ToRawValue(root)
+		fmt.Println(output)
+		return nil
 	}
 
 	// JSON output mode

@@ -28,6 +28,9 @@ type Theme struct {
 	TreeBranch lipgloss.Style
 	Collapsed  lipgloss.Style
 
+	// Array
+	ArrayIndex lipgloss.Style
+
 	// Type annotations
 	TypeLabel lipgloss.Style
 }
@@ -68,6 +71,8 @@ func DefaultTheme() *Theme {
 		TreeBranch: lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#6E7781", Dark: "#484F58"}),
 		Collapsed: lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#6E7781", Dark: "#8B949E"}),
+		ArrayIndex: lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#6E7781", Dark: "#8B949E"}),
 		TypeLabel: lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#8B949E", Dark: "#6E7681"}).

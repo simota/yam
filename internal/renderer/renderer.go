@@ -119,10 +119,14 @@ func (r *Renderer) renderSingleNode(buf *strings.Builder, node *parser.YamNode, 
 		}
 	}
 
-	// Key (for mapping entries)
+	// Key (for mapping entries) or array index
 	if node.Key != "" {
 		line.WriteString(r.theme.Key.Render(node.Key))
 		line.WriteString(r.theme.KeySeparator.Render(": "))
+	} else if node.Parent != nil && node.Parent.Kind() == parser.KindSequence {
+		// Array element - show index
+		line.WriteString(r.theme.ArrayIndex.Render(fmt.Sprintf("[%d]", node.Index)))
+		line.WriteString(r.theme.KeySeparator.Render(" "))
 	}
 
 	// Value rendering based on node type
@@ -135,8 +139,6 @@ func (r *Renderer) renderSingleNode(buf *strings.Builder, node *parser.YamNode, 
 		if node.Collapsed {
 			count := len(node.Children)
 			line.WriteString(r.theme.Collapsed.Render(fmt.Sprintf("[%d items]", count)))
-		} else if node.Key == "" {
-			line.WriteString(r.theme.TreeBranch.Render("-"))
 		}
 	case parser.KindScalar:
 		line.WriteString(r.renderValue(node))
