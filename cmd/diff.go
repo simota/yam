@@ -6,10 +6,12 @@ import (
 
 	"github.com/simota/yam/internal/diff"
 	"github.com/simota/yam/internal/parser"
+	diffui "github.com/simota/yam/internal/ui/diff"
 	"github.com/spf13/cobra"
 )
 
 var summaryOnly bool
+var diffInteractive bool
 
 var diffCmd = &cobra.Command{
 	Use:   "diff <file1> <file2>",
@@ -28,6 +30,7 @@ Exit codes:
 Examples:
   yam diff config-dev.yaml config-prod.yaml
   yam diff --summary config-dev.yaml config-prod.yaml
+  yam diff -i config-dev.yaml config-prod.yaml  # Interactive TUI mode
   yam diff config.yaml config.json  # Cross-format comparison`,
 	Args: cobra.ExactArgs(2),
 	RunE: runDiff,
@@ -36,6 +39,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(diffCmd)
 	diffCmd.Flags().BoolVarP(&summaryOnly, "summary", "s", false, "Show only summary (no detailed diff)")
+	diffCmd.Flags().BoolVarP(&diffInteractive, "interactive", "i", false, "Interactive TUI mode with split view")
 }
 
 func runDiff(cmd *cobra.Command, args []string) error {
@@ -57,6 +61,11 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	result := diff.Compare(left, right)
 	result.LeftFile = file1
 	result.RightFile = file2
+
+	// Interactive TUI mode
+	if diffInteractive {
+		return diffui.Run(result, left, right)
+	}
 
 	// Render output
 	if summaryOnly {
