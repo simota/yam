@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -11,11 +12,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/simota/yam/internal/parser"
 	"github.com/simota/yam/internal/renderer"
+	"gopkg.in/yaml.v3"
 )
 
 // Model represents the TUI application state
 type Model struct {
 	root      *parser.YamNode
+	rawRoot   *yaml.Node // original yaml.Node for saving
 	flatNodes []*parser.YamNode
 	cursor    int
 	offset    int
@@ -32,6 +35,17 @@ type Model struct {
 	searchInput textinput.Model
 	matches     []int // indices in flatNodes that match
 	matchIndex  int   // current position in matches
+
+	// Edit state
+	editMode      bool
+	editInput     textinput.Model
+	editNode      *parser.YamNode
+	originalValue string
+
+	// Dirty state
+	modified      bool
+	modifiedNodes map[*parser.YamNode]bool
+	statusMessage string // temporary status message
 }
 
 // NewModel creates a new TUI model
@@ -41,18 +55,26 @@ func NewModel(root *parser.YamNode, filename string, treeStyle renderer.TreeStyl
 	opts.Interactive = true
 	opts.ShowTypes = showTypes
 
-	ti := textinput.New()
-	ti.Placeholder = "search..."
-	ti.Prompt = "/"
-	ti.CharLimit = 100
+	searchTi := textinput.New()
+	searchTi.Placeholder = "search..."
+	searchTi.Prompt = "/"
+	searchTi.CharLimit = 100
+
+	editTi := textinput.New()
+	editTi.Placeholder = ""
+	editTi.Prompt = "Edit: "
+	editTi.CharLimit = 500
 
 	m := Model{
-		root:        root,
-		filename:    filename,
-		renderer:    renderer.New(nil, opts),
-		keyMap:      DefaultKeyMap(),
-		help:        help.New(),
-		searchInput: ti,
+		root:          root,
+		rawRoot:       root.Raw,
+		filename:      filename,
+		renderer:      renderer.New(nil, opts),
+		keyMap:        DefaultKeyMap(),
+		help:          help.New(),
+		searchInput:   searchTi,
+		editInput:     editTi,
+		modifiedNodes: make(map[*parser.YamNode]bool),
 	}
 	m.rebuildFlatList()
 	return m
@@ -82,6 +104,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.Width = msg.Width
 
 	case tea.KeyMsg:
+		// Clear status message on any key press
+		m.statusMessage = ""
+
+		// Edit mode handling
+		if m.editMode {
+			switch msg.Type {
+			case tea.KeyEnter:
+				// Confirm edit
+				m.confirmEdit()
+				return m, nil
+			case tea.KeyEsc:
+				// Cancel edit
+				m.editMode = false
+				m.editInput.Blur()
+				m.editNode = nil
+				return m, nil
+			default:
+				// Update text input
+				m.editInput, cmd = m.editInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		// Search mode handling
 		if m.searchMode {
 			switch msg.Type {
@@ -112,10 +157,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Normal mode handling
 		switch {
 		case key.Matches(msg, m.keyMap.Quit):
+			// Confirm quit if modified
+			if m.modified {
+				m.statusMessage = "Unsaved changes! Press q again to quit, or Ctrl+S to save"
+				m.modified = false // Allow quit on next q press
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case key.Matches(msg, m.keyMap.Help):
 			m.showHelp = !m.showHelp
+
+		case key.Matches(msg, m.keyMap.Edit):
+			m.startEdit()
+			if m.editMode {
+				return m, textinput.Blink
+			}
+
+		case key.Matches(msg, m.keyMap.Save):
+			m.saveFile()
 
 		case key.Matches(msg, m.keyMap.Search):
 			m.searchMode = true
@@ -323,6 +383,110 @@ func (m *Model) clearSearch() {
 	m.searchInput.SetValue("")
 }
 
+// startEdit starts editing the current node if it's a scalar value
+func (m *Model) startEdit() {
+	if m.cursor < 0 || m.cursor >= len(m.flatNodes) {
+		return
+	}
+
+	node := m.flatNodes[m.cursor]
+
+	// Check if node is editable (scalar value only)
+	if !m.isEditable(node) {
+		m.statusMessage = "Cannot edit: not a scalar value"
+		return
+	}
+
+	// Check if file is from stdin
+	if m.filename == "stdin" || m.filename == "-" {
+		m.statusMessage = "Cannot edit: read-only (stdin)"
+		return
+	}
+
+	m.editMode = true
+	m.editNode = node
+	m.originalValue = node.Value()
+	m.editInput.SetValue(node.Value())
+	m.editInput.Focus()
+	m.editInput.CursorEnd()
+}
+
+// isEditable checks if a node can be edited (scalar values only)
+func (m *Model) isEditable(node *parser.YamNode) bool {
+	if node == nil || node.Raw == nil {
+		return false
+	}
+	kind := node.Kind()
+	return kind == parser.KindScalar
+}
+
+// confirmEdit confirms the edit and updates the node value
+func (m *Model) confirmEdit() {
+	if m.editNode == nil {
+		return
+	}
+
+	newValue := m.editInput.Value()
+
+	// Only mark as modified if value actually changed
+	if newValue != m.originalValue {
+		// Update the yaml.Node value
+		m.editNode.Raw.Value = newValue
+
+		// Mark as modified
+		m.modified = true
+		m.modifiedNodes[m.editNode] = true
+	}
+
+	// Exit edit mode
+	m.editMode = false
+	m.editInput.Blur()
+	m.editNode = nil
+	m.originalValue = ""
+}
+
+// saveFile saves the modified YAML to the original file
+func (m *Model) saveFile() {
+	// Check if file is from stdin
+	if m.filename == "stdin" || m.filename == "-" {
+		m.statusMessage = "Cannot save: read-only (stdin)"
+		return
+	}
+
+	if !m.modified && len(m.modifiedNodes) == 0 {
+		m.statusMessage = "No changes to save"
+		return
+	}
+
+	// Open file for writing
+	file, err := os.Create(m.filename)
+	if err != nil {
+		m.statusMessage = fmt.Sprintf("Error: %v", err)
+		return
+	}
+	defer file.Close()
+
+	// Encode with yaml.v3
+	encoder := yaml.NewEncoder(file)
+	encoder.SetIndent(2)
+	defer encoder.Close()
+
+	if err := encoder.Encode(m.rawRoot); err != nil {
+		m.statusMessage = fmt.Sprintf("Error: %v", err)
+		return
+	}
+
+	// Clear modified state
+	m.modified = false
+	m.modifiedNodes = make(map[*parser.YamNode]bool)
+	m.statusMessage = "Saved!"
+}
+
+// isModifiedNode checks if a node has been modified
+func (m *Model) isModifiedNode(node *parser.YamNode) bool {
+	return m.modifiedNodes[node]
+}
+
 // View implements tea.Model
 func (m Model) View() string {
 	if m.width == 0 {
@@ -338,7 +502,15 @@ func (m Model) View() string {
 		Background(lipgloss.Color("#21262D")).
 		Padding(0, 1).
 		Width(m.width)
-	b.WriteString(headerStyle.Render(fmt.Sprintf(" yam - %s", m.filename)))
+
+	headerText := fmt.Sprintf(" yam - %s", m.filename)
+	if m.modified || len(m.modifiedNodes) > 0 {
+		headerText += " [modified]"
+	}
+	if m.filename == "stdin" || m.filename == "-" {
+		headerText += " [read-only]"
+	}
+	b.WriteString(headerStyle.Render(headerText))
 	b.WriteString("\n")
 
 	// Styles for content
@@ -347,6 +519,9 @@ func (m Model) View() string {
 		Width(m.width)
 	matchStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("#3D3200")).
+		Width(m.width)
+	modifiedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#3D2800")).
 		Width(m.width)
 
 	// Content
@@ -360,10 +535,13 @@ func (m Model) View() string {
 			line := contentLines[idx]
 			isMatch := m.isMatchIndex(idx)
 			isCursor := idx == m.cursor
+			isModified := idx < len(m.flatNodes) && m.isModifiedNode(m.flatNodes[idx])
 
-			// Apply styles: cursor takes priority over match
+			// Apply styles: cursor takes priority, then modified, then match
 			if isCursor {
 				line = cursorStyle.Render(line)
+			} else if isModified {
+				line = modifiedStyle.Render(line)
 			} else if isMatch {
 				line = matchStyle.Render(line)
 			}
@@ -379,7 +557,11 @@ func (m Model) View() string {
 		Padding(0, 1).
 		Width(m.width)
 
-	if m.searchMode {
+	if m.editMode {
+		// Edit input display
+		editLine := m.editInput.View() + "  [Enter: confirm, Esc: cancel]"
+		b.WriteString(footerStyle.Render(editLine))
+	} else if m.searchMode {
 		// Search input display
 		searchLine := m.searchInput.View()
 		if len(m.matches) > 0 {
@@ -388,6 +570,9 @@ func (m Model) View() string {
 			searchLine += "  [no matches]"
 		}
 		b.WriteString(footerStyle.Render(searchLine))
+	} else if m.statusMessage != "" {
+		// Status message display
+		b.WriteString(footerStyle.Render(m.statusMessage))
 	} else {
 		// Normal footer
 		position := fmt.Sprintf("%d/%d", m.cursor+1, len(m.flatNodes))
@@ -398,6 +583,10 @@ func (m Model) View() string {
 		// Show match info if matches exist
 		if len(m.matches) > 0 {
 			position += fmt.Sprintf("  [match %d/%d]", m.matchIndex+1, len(m.matches))
+		}
+		// Show modified indicator with save hint
+		if m.modified || len(m.modifiedNodes) > 0 {
+			position += "  [modified - Ctrl+S to save]"
 		}
 		b.WriteString(footerStyle.Render(position))
 	}

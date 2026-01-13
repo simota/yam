@@ -18,6 +18,8 @@ type KeyMap struct {
 	Search      key.Binding
 	NextMatch   key.Binding
 	PrevMatch   key.Binding
+	Edit        key.Binding
+	Save        key.Binding
 	Help        key.Binding
 	Quit        key.Binding
 }
@@ -62,12 +64,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("Enter/o", "toggle fold"),
 		),
 		ExpandAll: key.NewBinding(
-			key.WithKeys("e"),
-			key.WithHelp("e", "expand all"),
+			key.WithKeys("O"),
+			key.WithHelp("O", "expand all"),
 		),
 		CollapseAll: key.NewBinding(
-			key.WithKeys("E"),
-			key.WithHelp("E", "collapse all"),
+			key.WithKeys("C"),
+			key.WithHelp("C", "collapse all"),
 		),
 		Search: key.NewBinding(
 			key.WithKeys("/"),
@@ -80,6 +82,14 @@ func DefaultKeyMap() KeyMap {
 		PrevMatch: key.NewBinding(
 			key.WithKeys("N"),
 			key.WithHelp("N", "prev match"),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "edit"),
+		),
+		Save: key.NewBinding(
+			key.WithKeys("ctrl+s"),
+			key.WithHelp("Ctrl+S", "save"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -94,7 +104,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns keybindings to be shown in the mini help view
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Toggle, k.Search, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Toggle, k.Edit, k.Search, k.Help, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view
@@ -104,6 +114,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.HalfUp, k.HalfDown, k.Top, k.Bottom},
 		{k.Toggle, k.ExpandAll, k.CollapseAll},
 		{k.Search, k.NextMatch, k.PrevMatch},
+		{k.Edit, k.Save},
 		{k.Help, k.Quit},
 	}
 }
