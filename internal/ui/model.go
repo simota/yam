@@ -15,6 +15,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// maxUndoStackSize is the maximum number of undo entries to keep
+const maxUndoStackSize = 10
+
+// UndoEntry represents a single undoable edit action
+type UndoEntry struct {
+	Node     *parser.YamNode
+	OldValue string
+	NewValue string
+}
+
 // Model represents the TUI application state
 type Model struct {
 	root      *parser.YamNode
@@ -46,6 +56,10 @@ type Model struct {
 	modified      bool
 	modifiedNodes map[*parser.YamNode]bool
 	statusMessage string // temporary status message
+
+	// Undo/Redo state
+	undoStack []UndoEntry
+	redoStack []UndoEntry
 }
 
 // NewModel creates a new TUI model
@@ -176,6 +190,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keyMap.Save):
 			m.saveFile()
+
+		case key.Matches(msg, m.keyMap.Undo):
+			m.undo()
+
+		case key.Matches(msg, m.keyMap.Redo):
+			m.redo()
 
 		case key.Matches(msg, m.keyMap.Search):
 			m.searchMode = true
@@ -430,6 +450,14 @@ func (m *Model) confirmEdit() {
 
 	// Only mark as modified if value actually changed
 	if newValue != m.originalValue {
+		// Push to undo stack before modifying
+		entry := UndoEntry{
+			Node:     m.editNode,
+			OldValue: m.originalValue,
+			NewValue: newValue,
+		}
+		m.pushUndo(entry)
+
 		// Update the yaml.Node value
 		m.editNode.Raw.Value = newValue
 
@@ -485,6 +513,77 @@ func (m *Model) saveFile() {
 // isModifiedNode checks if a node has been modified
 func (m *Model) isModifiedNode(node *parser.YamNode) bool {
 	return m.modifiedNodes[node]
+}
+
+// pushUndo adds an entry to the undo stack
+func (m *Model) pushUndo(entry UndoEntry) {
+	m.undoStack = append(m.undoStack, entry)
+	if len(m.undoStack) > maxUndoStackSize {
+		m.undoStack = m.undoStack[1:]
+	}
+	// Clear redo stack when new edit is made
+	m.redoStack = nil
+}
+
+// undo reverts the last edit
+func (m *Model) undo() {
+	if len(m.undoStack) == 0 {
+		m.statusMessage = "Nothing to undo"
+		return
+	}
+
+	// Pop from undo stack
+	entry := m.undoStack[len(m.undoStack)-1]
+	m.undoStack = m.undoStack[:len(m.undoStack)-1]
+
+	// Restore old value
+	entry.Node.Raw.Value = entry.OldValue
+
+	// Push to redo stack
+	m.redoStack = append(m.redoStack, entry)
+
+	// Update modified state
+	m.updateModifiedState()
+
+	m.statusMessage = "Undo: restored value"
+}
+
+// redo re-applies a previously undone edit
+func (m *Model) redo() {
+	if len(m.redoStack) == 0 {
+		m.statusMessage = "Nothing to redo"
+		return
+	}
+
+	// Pop from redo stack
+	entry := m.redoStack[len(m.redoStack)-1]
+	m.redoStack = m.redoStack[:len(m.redoStack)-1]
+
+	// Re-apply new value
+	entry.Node.Raw.Value = entry.NewValue
+
+	// Push back to undo stack
+	m.undoStack = append(m.undoStack, entry)
+
+	// Update modified state
+	m.modified = true
+	m.modifiedNodes[entry.Node] = true
+
+	m.statusMessage = "Redo: re-applied value"
+}
+
+// updateModifiedState recalculates the modified state based on undo history
+func (m *Model) updateModifiedState() {
+	// Check if any nodes are still modified
+	// A node is modified if it appears in undoStack with a different current value
+	m.modifiedNodes = make(map[*parser.YamNode]bool)
+	for _, entry := range m.undoStack {
+		// Node is modified if current value differs from original
+		if entry.Node.Raw.Value != entry.OldValue {
+			m.modifiedNodes[entry.Node] = true
+		}
+	}
+	m.modified = len(m.modifiedNodes) > 0
 }
 
 // View implements tea.Model

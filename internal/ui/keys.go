@@ -20,6 +20,8 @@ type KeyMap struct {
 	PrevMatch   key.Binding
 	Edit        key.Binding
 	Save        key.Binding
+	Undo        key.Binding
+	Redo        key.Binding
 	Help        key.Binding
 	Quit        key.Binding
 }
@@ -91,6 +93,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+s"),
 			key.WithHelp("Ctrl+S", "save"),
 		),
+		Undo: key.NewBinding(
+			key.WithKeys("u"),
+			key.WithHelp("u", "undo"),
+		),
+		Redo: key.NewBinding(
+			key.WithKeys("ctrl+r"),
+			key.WithHelp("Ctrl+R", "redo"),
+		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -104,7 +114,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns keybindings to be shown in the mini help view
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Toggle, k.Edit, k.Search, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Toggle, k.Edit, k.Undo, k.Search, k.Help, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view
@@ -114,7 +124,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.HalfUp, k.HalfDown, k.Top, k.Bottom},
 		{k.Toggle, k.ExpandAll, k.CollapseAll},
 		{k.Search, k.NextMatch, k.PrevMatch},
-		{k.Edit, k.Save},
+		{k.Edit, k.Save, k.Undo, k.Redo},
 		{k.Help, k.Quit},
 	}
 }
