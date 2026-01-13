@@ -14,6 +14,7 @@ import (
 var (
 	interactive bool
 	treeStyle   string
+	showTypes   bool
 	version     = "0.1.0"
 )
 
@@ -38,6 +39,7 @@ func Execute() error {
 func init() {
 	rootCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive TUI mode")
 	rootCmd.Flags().StringVarP(&treeStyle, "style", "s", "unicode", "Tree style: unicode, ascii, indent")
+	rootCmd.Flags().BoolVarP(&showTypes, "types", "t", false, "Show type annotations")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -86,6 +88,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// CLI mode: render and print
 	opts := renderer.DefaultOptions()
 	opts.TreeStyle = style
+	opts.ShowTypes = showTypes
 	r := renderer.New(nil, opts)
 	output := r.Render(root)
 	fmt.Print(output)

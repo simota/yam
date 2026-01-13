@@ -27,6 +27,9 @@ type Theme struct {
 	// Tree
 	TreeBranch lipgloss.Style
 	Collapsed  lipgloss.Style
+
+	// Type annotations
+	TypeLabel lipgloss.Style
 }
 
 // DefaultTheme returns the default color theme
@@ -66,6 +69,9 @@ func DefaultTheme() *Theme {
 			Foreground(lipgloss.AdaptiveColor{Light: "#6E7781", Dark: "#484F58"}),
 		Collapsed: lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#6E7781", Dark: "#8B949E"}),
+		TypeLabel: lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#8B949E", Dark: "#6E7681"}).
+			Italic(true),
 	}
 }
 

@@ -14,6 +14,7 @@ type Options struct {
 	IndentSize      int
 	MaxWidth        int
 	Interactive     bool // Show fold indicators (▼/▶) for TUI mode
+	ShowTypes       bool // Show type annotations like <str>, <int>
 }
 
 // DefaultOptions returns default rendering options
@@ -163,24 +164,52 @@ func (r *Renderer) renderValue(node *parser.YamNode) string {
 	value := node.Value()
 	scalarType := node.InferType()
 
+	var rendered string
 	switch scalarType {
 	case parser.TypeNull:
 		if value == "" || value == "~" {
-			return r.theme.Null.Render("null")
+			rendered = r.theme.Null.Render("null")
+		} else {
+			rendered = r.theme.Null.Render(value)
 		}
-		return r.theme.Null.Render(value)
 	case parser.TypeBoolean:
-		return r.theme.Boolean.Render(value)
+		rendered = r.theme.Boolean.Render(value)
 	case parser.TypeNumber:
-		return r.theme.Number.Render(value)
+		rendered = r.theme.Number.Render(value)
 	case parser.TypeTimestamp:
-		return r.theme.Timestamp.Render(value)
+		rendered = r.theme.Timestamp.Render(value)
 	default:
 		// Quote strings that might be confusing
 		if needsQuoting(value) {
-			return r.theme.String.Render(fmt.Sprintf("%q", value))
+			rendered = r.theme.String.Render(fmt.Sprintf("%q", value))
+		} else {
+			rendered = r.theme.String.Render(value)
 		}
-		return r.theme.String.Render(value)
+	}
+
+	// Add type annotation if enabled
+	if r.options.ShowTypes {
+		typeLabel := r.getTypeLabel(scalarType)
+		rendered += " " + r.theme.TypeLabel.Render(typeLabel)
+	}
+
+	return rendered
+}
+
+func (r *Renderer) getTypeLabel(t parser.ScalarType) string {
+	switch t {
+	case parser.TypeString:
+		return "<str>"
+	case parser.TypeNumber:
+		return "<int>"
+	case parser.TypeBoolean:
+		return "<bool>"
+	case parser.TypeNull:
+		return "<null>"
+	case parser.TypeTimestamp:
+		return "<time>"
+	default:
+		return ""
 	}
 }
 
