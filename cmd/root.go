@@ -16,6 +16,7 @@ var (
 	interactive bool
 	treeStyle   string
 	showTypes   bool
+	outputJSON  bool
 	version     = "0.1.0"
 )
 
@@ -29,7 +30,9 @@ Examples:
   cat config.yaml | yam        # Render from stdin
   yam -i config.yaml           # Interactive TUI mode
   yam '.data.host' config.yaml # Extract value at path
-  yam '.items[0]' config.yaml  # Extract array element`,
+  yam '.items[0]' config.yaml  # Extract array element
+  yam --json config.yaml       # Output as JSON
+  yam data.json                # Render JSON file as tree`,
 	Version: version,
 	Args:    cobra.MaximumNArgs(2),
 	RunE:    run,
@@ -43,6 +46,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive TUI mode")
 	rootCmd.Flags().StringVarP(&treeStyle, "style", "s", "unicode", "Tree style: unicode, ascii, indent")
 	rootCmd.Flags().BoolVarP(&showTypes, "types", "t", false, "Show type annotations")
+	rootCmd.Flags().BoolVarP(&outputJSON, "json", "j", false, "Output as JSON")
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -88,9 +92,16 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Parse YAML
+	// Parse input (YAML or JSON based on file extension)
 	p := parser.New()
-	root, err := p.Parse(input)
+	var root *parser.YamNode
+	var err error
+
+	if isJSONFile(filename) {
+		root, err = p.ParseJSON(input)
+	} else {
+		root, err = p.Parse(input)
+	}
 	if err != nil {
 		return err
 	}
@@ -117,6 +128,16 @@ func run(cmd *cobra.Command, args []string) error {
 		return ui.Run(root, filename, style, showTypes)
 	}
 
+	// JSON output mode
+	if outputJSON {
+		jsonBytes, err := parser.ToJSON(root, true)
+		if err != nil {
+			return fmt.Errorf("failed to convert to JSON: %w", err)
+		}
+		fmt.Println(string(jsonBytes))
+		return nil
+	}
+
 	// CLI mode: render and print
 	opts := renderer.DefaultOptions()
 	opts.TreeStyle = style
@@ -126,4 +147,8 @@ func run(cmd *cobra.Command, args []string) error {
 	fmt.Print(output)
 
 	return nil
+}
+
+func isJSONFile(filename string) bool {
+	return strings.HasSuffix(strings.ToLower(filename), ".json")
 }

@@ -183,6 +183,19 @@ func (n *YamNode) InferType() ScalarType {
 	return TypeString
 }
 
+// Helper functions to create yaml.Node for JSON parsing
+func makeMappingRaw() *yaml.Node {
+	return &yaml.Node{Kind: yaml.MappingNode}
+}
+
+func makeSequenceRaw() *yaml.Node {
+	return &yaml.Node{Kind: yaml.SequenceNode}
+}
+
+func makeScalarRaw(value, tag string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Value: value, Tag: tag}
+}
+
 func isNumber(s string) bool {
 	if s == "" {
 		return false
