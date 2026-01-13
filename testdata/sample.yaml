@@ -1,0 +1,36 @@
+# Sample YAML for testing yam
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+  namespace: default
+  labels:
+    app: myapp
+    version: "1.0"
+data:
+  # Database configuration
+  database:
+    host: localhost
+    port: 5432
+    name: mydb
+    ssl: true
+
+  # Feature flags
+  features:
+    - name: dark-mode
+      enabled: true
+    - name: beta-features
+      enabled: false
+
+  # Misc settings
+  timeout: 30
+  retries: 3
+  debug: false
+  empty_value: null
+
+  # Nested structure
+  nested:
+    level1:
+      level2:
+        level3:
+          value: "deeply nested"
