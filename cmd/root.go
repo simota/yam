@@ -82,7 +82,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	if interactive {
 		// Run TUI
-		return ui.Run(root, filename, style)
+		return ui.Run(root, filename, style, showTypes)
 	}
 
 	// CLI mode: render and print

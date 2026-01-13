@@ -28,10 +28,11 @@ type Model struct {
 }
 
 // NewModel creates a new TUI model
-func NewModel(root *parser.YamNode, filename string, treeStyle renderer.TreeStyle) Model {
+func NewModel(root *parser.YamNode, filename string, treeStyle renderer.TreeStyle, showTypes bool) Model {
 	opts := renderer.DefaultOptions()
 	opts.TreeStyle = treeStyle
 	opts.Interactive = true
+	opts.ShowTypes = showTypes
 
 	m := Model{
 		root:     root,

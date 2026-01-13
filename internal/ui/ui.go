@@ -7,8 +7,8 @@ import (
 )
 
 // Run starts the TUI application
-func Run(root *parser.YamNode, filename string, treeStyle renderer.TreeStyle) error {
-	m := NewModel(root, filename, treeStyle)
+func Run(root *parser.YamNode, filename string, treeStyle renderer.TreeStyle, showTypes bool) error {
+	m := NewModel(root, filename, treeStyle, showTypes)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
