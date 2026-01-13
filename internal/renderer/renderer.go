@@ -13,6 +13,7 @@ type Options struct {
 	TreeStyle       TreeStyle
 	IndentSize      int
 	MaxWidth        int
+	Interactive     bool // Show fold indicators (▼/▶) for TUI mode
 }
 
 // DefaultOptions returns default rendering options
@@ -22,6 +23,7 @@ func DefaultOptions() Options {
 		TreeStyle:       TreeStyleUnicode,
 		IndentSize:      2,
 		MaxWidth:        0,
+		Interactive:     false,
 	}
 }
 
@@ -107,15 +109,13 @@ func (r *Renderer) renderSingleNode(buf *strings.Builder, node *parser.YamNode, 
 		}
 	}
 
-	// Collapse indicator for containers
-	if node.IsContainer() && node.HasChildren() {
+	// Collapse indicator for containers (only in interactive/TUI mode)
+	if r.options.Interactive && node.IsContainer() && node.HasChildren() {
 		if node.Collapsed {
 			line.WriteString(r.theme.TreeBranch.Render(r.chars.Collapsed + " "))
 		} else {
 			line.WriteString(r.theme.TreeBranch.Render(r.chars.Expanded + " "))
 		}
-	} else {
-		line.WriteString("  ")
 	}
 
 	// Key (for mapping entries)

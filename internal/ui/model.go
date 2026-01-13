@@ -31,6 +31,7 @@ type Model struct {
 func NewModel(root *parser.YamNode, filename string, treeStyle renderer.TreeStyle) Model {
 	opts := renderer.DefaultOptions()
 	opts.TreeStyle = treeStyle
+	opts.Interactive = true
 
 	m := Model{
 		root:     root,
