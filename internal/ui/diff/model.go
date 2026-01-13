@@ -31,6 +31,9 @@ type Model struct {
 	keyMap   KeyMap
 	help     help.Model
 	showHelp bool
+
+	// Status message (temporary feedback)
+	statusMessage string
 }
 
 // NewModel creates a new diff TUI model
@@ -94,6 +97,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.Width = msg.Width
 
 	case tea.KeyMsg:
+		// Clear status message on any key press
+		m.statusMessage = ""
+
 		switch {
 		case key.Matches(msg, m.keyMap.Quit):
 			return m, tea.Quit
@@ -178,6 +184,8 @@ func (m *Model) nextDiff() {
 			return
 		}
 	}
+	// No more diffs found
+	m.statusMessage = "No more diffs below"
 }
 
 // prevDiff jumps to previous changed node
@@ -189,6 +197,8 @@ func (m *Model) prevDiff() {
 			return
 		}
 	}
+	// No more diffs found
+	m.statusMessage = "No more diffs above"
 }
 
 // View implements tea.Model
@@ -237,7 +247,8 @@ func (m Model) renderHeader() string {
 		rightFile = "(right)"
 	}
 
-	headerText := fmt.Sprintf(" yam diff: %s ↔ %s", leftFile, rightFile)
+	// Show OLD/NEW labels for clarity
+	headerText := fmt.Sprintf(" ← OLD: %s  │  NEW: %s →", leftFile, rightFile)
 	return headerStyle.Render(headerText)
 }
 
@@ -383,13 +394,29 @@ func (m Model) renderFooter() string {
 		Padding(0, 1).
 		Width(m.width)
 
+	// If there's a status message, show it prominently
+	if m.statusMessage != "" {
+		return footerStyle.Render(m.statusMessage)
+	}
+
 	// Position info
 	position := fmt.Sprintf("%d/%d", m.cursor+1, len(m.diffNodes))
 
-	// Summary
-	summary := diff.RenderSummary(m.result.Summary)
+	// Legend with summary
+	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1"))
+	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))
+	modifiedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9E2AF"))
 
-	footerText := position + "  |  " + summary
+	legend := fmt.Sprintf("%s %d  %s %d  %s %d",
+		addedStyle.Render("+"),
+		m.result.Summary.Added,
+		removedStyle.Render("-"),
+		m.result.Summary.Removed,
+		modifiedStyle.Render("~"),
+		m.result.Summary.Modified,
+	)
+
+	footerText := position + "  |  " + legend
 	return footerStyle.Render(footerText)
 }
 

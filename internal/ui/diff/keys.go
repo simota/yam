@@ -45,11 +45,11 @@ func DefaultKeyMap() KeyMap {
 		),
 		NextDiff: key.NewBinding(
 			key.WithKeys("n", "]"),
-			key.WithHelp("n/]", "next diff"),
+			key.WithHelp("n", "next diff"),
 		),
 		PrevDiff: key.NewBinding(
 			key.WithKeys("N", "["),
-			key.WithHelp("N/[", "prev diff"),
+			key.WithHelp("N", "prev diff"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
