@@ -47,9 +47,30 @@ func Render(result *DiffResult) string {
 	return buf.String()
 }
 
+// hasChanges checks if a DiffNode or any of its children have changes
+func hasChanges(node *DiffNode) bool {
+	if node == nil {
+		return false
+	}
+	if node.Type != DiffUnchanged {
+		return true
+	}
+	for _, child := range node.Children {
+		if hasChanges(child) {
+			return true
+		}
+	}
+	return false
+}
+
 // renderDiffNode recursively renders a DiffNode and its children
 func renderDiffNode(buf *strings.Builder, node *DiffNode, indent string) {
 	if node == nil {
+		return
+	}
+
+	// Skip unchanged nodes that have no changed children
+	if node.Type == DiffUnchanged && !hasChanges(node) {
 		return
 	}
 
@@ -61,6 +82,15 @@ func renderDiffNode(buf *strings.Builder, node *DiffNode, indent string) {
 
 	// Skip rendering the root document node itself, just render children
 	if isDocumentNode(node) {
+		for _, child := range node.Children {
+			renderDiffNode(buf, child, indent)
+		}
+		return
+	}
+
+	// Skip rendering if key is empty (root-level container without key)
+	if key == "" && isContainerNode(node) {
+		// Just render children without a header line
 		for _, child := range node.Children {
 			renderDiffNode(buf, child, indent)
 		}
@@ -95,22 +125,17 @@ func renderDiffNode(buf *strings.Builder, node *DiffNode, indent string) {
 	}
 }
 
-// RenderSummary returns a summary string like "Summary: 3 added, 1 removed, 2 modified"
+// RenderSummary returns a summary string like "Summary: 3 added, 0 removed, 2 modified"
 func RenderSummary(summary DiffSummary) string {
-	var parts []string
-
-	if summary.Added > 0 {
-		parts = append(parts, addedStyle.Render(fmt.Sprintf("%d added", summary.Added)))
-	}
-	if summary.Removed > 0 {
-		parts = append(parts, removedStyle.Render(fmt.Sprintf("%d removed", summary.Removed)))
-	}
-	if summary.Modified > 0 {
-		parts = append(parts, modifiedStyle.Render(fmt.Sprintf("%d modified", summary.Modified)))
-	}
-
-	if len(parts) == 0 {
+	if summary.Total == 0 {
 		return "Summary: no changes"
+	}
+
+	// Always show all three categories for clarity
+	parts := []string{
+		addedStyle.Render(fmt.Sprintf("%d added", summary.Added)),
+		removedStyle.Render(fmt.Sprintf("%d removed", summary.Removed)),
+		modifiedStyle.Render(fmt.Sprintf("%d modified", summary.Modified)),
 	}
 
 	return "Summary: " + strings.Join(parts, ", ")
@@ -138,11 +163,11 @@ func getNodeKey(node *DiffNode) string {
 	if node.Right != nil && node.Right.Key != "" {
 		return node.Right.Key
 	}
-	// For sequence items, use index
-	if node.Left != nil {
+	// For sequence items, use index - but only if parent is a sequence
+	if node.Left != nil && node.Left.Parent != nil && node.Left.Parent.Kind() == parser.KindSequence {
 		return fmt.Sprintf("[%d]", node.Left.Index)
 	}
-	if node.Right != nil {
+	if node.Right != nil && node.Right.Parent != nil && node.Right.Parent.Kind() == parser.KindSequence {
 		return fmt.Sprintf("[%d]", node.Right.Index)
 	}
 	return ""

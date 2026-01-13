@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/simota/yam/internal/parser"
 )
@@ -72,19 +73,26 @@ func compareNodes(left, right *parser.YamNode, path string) *DiffNode {
 			rightByKey[child.Key] = child
 		}
 
-		// Collect all unique keys from both maps
-		allKeys := make(map[string]bool)
+		// Collect all unique keys from both maps and sort them for consistent output
+		allKeysMap := make(map[string]bool)
 		for k := range leftByKey {
-			allKeys[k] = true
+			allKeysMap[k] = true
 		}
 		for k := range rightByKey {
-			allKeys[k] = true
+			allKeysMap[k] = true
 		}
+
+		// Sort keys for consistent output order
+		allKeys := make([]string, 0, len(allKeysMap))
+		for k := range allKeysMap {
+			allKeys = append(allKeys, k)
+		}
+		sort.Strings(allKeys)
 
 		// Compare each key
 		var children []*DiffNode
 		hasChanges := false
-		for key := range allKeys {
+		for _, key := range allKeys {
 			leftChild := leftByKey[key]
 			rightChild := rightByKey[key]
 			childPath := path + "." + key
