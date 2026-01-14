@@ -41,8 +41,10 @@ Examples:
   cat config.yaml | yam fmt        # Format from stdin
   yam fmt --indent 4 config.yaml   # Use 4-space indentation
   yam fmt --sort-keys config.yaml  # Sort keys alphabetically`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runFmt,
+	Args:          cobra.MaximumNArgs(1),
+	RunE:          runFmt,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func init() {
@@ -70,7 +72,7 @@ func runFmt(cmd *cobra.Command, args []string) error {
 		// stdin
 		stat, _ := os.Stdin.Stat()
 		if (stat.Mode() & os.ModeCharDevice) != 0 {
-			return fmt.Errorf("no input: provide a file or pipe YAML content")
+			return fmt.Errorf("no input provided\n\nUsage: yam fmt <file> or pipe YAML via stdin\n\nExamples:\n  yam fmt config.yaml\n  cat config.yaml | yam fmt")
 		}
 		input = os.Stdin
 		isStdin = true
@@ -85,7 +87,7 @@ func runFmt(cmd *cobra.Command, args []string) error {
 	p := parser.New()
 	yamNode, err := p.Parse(input)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid YAML: %w", err)
 	}
 
 	// Format options
