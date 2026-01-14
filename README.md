@@ -19,6 +19,8 @@ Tree visualization, syntax highlighting, interactive TUI mode with inline editin
 | **Inline Editing** | Edit scalar values directly in TUI mode |
 | **Path Extraction** | Query values with JSONPath-like syntax |
 | **JSON Support** | Bidirectional YAML/JSON conversion |
+| **Formatting** | Format YAML files with consistent styling |
+| **Diff** | Structural comparison between YAML/JSON files |
 
 ## Installation
 
@@ -48,6 +50,15 @@ yam '.metadata.name' config.yaml
 
 # Output as JSON
 yam --json config.yaml
+
+# Format a YAML file
+yam fmt config.yaml
+
+# Format in-place
+yam fmt -w config.yaml
+
+# Compare two files
+yam diff config-dev.yaml config-prod.yaml
 ```
 
 ## Usage
@@ -63,6 +74,29 @@ Flags:
   -r, --raw            Output raw value without decoration
   -h, --help           Help for yam
   -v, --version        Version for yam
+```
+
+### Subcommands
+
+#### `yam fmt` - Format YAML files
+
+```
+yam fmt [flags] [file]
+
+Flags:
+  -w, --write        Write result to source file instead of stdout
+  -i, --indent int   Indentation width in spaces (default 2)
+  -s, --sort-keys    Sort keys alphabetically
+```
+
+#### `yam diff` - Compare YAML/JSON files
+
+```
+yam diff [flags] <file1> <file2>
+
+Flags:
+  -i, --interactive   Interactive TUI mode with split view
+  -s, --summary       Show only summary (no detailed diff)
 ```
 
 ## TUI Keybindings
@@ -135,6 +169,24 @@ yam --json values.yaml > values.json
 
 ```bash
 yam -t config.yaml
+```
+
+### Format YAML with sorted keys
+
+```bash
+yam fmt --sort-keys config.yaml > config-sorted.yaml
+```
+
+### Compare dev and prod configs
+
+```bash
+yam diff config-dev.yaml config-prod.yaml
+```
+
+### Interactive diff with split view
+
+```bash
+yam diff -i config-dev.yaml config-prod.yaml
 ```
 
 ## Built With
