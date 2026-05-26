@@ -1,5 +1,6 @@
 # Binary
 yam
+target/
 
 # IDE
 .idea/
@@ -11,7 +12,7 @@ yam
 .DS_Store
 Thumbs.db
 
-# Go
+# Native build artifacts
 *.exe
 *.exe~
 *.dll
