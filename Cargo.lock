@@ -233,8 +233,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -456,7 +454,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
- "serde_derive",
 ]
 
 [[package]]
@@ -717,9 +714,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "crossterm",
- "indexmap",
  "predicates",
- "serde",
  "serde_json",
  "serde_yaml",
 ]

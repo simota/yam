@@ -15,7 +15,6 @@ pub struct DiffNode<'a> {
     pub right: Option<&'a YamNode>,
     pub diff_type: DiffType,
     pub children: Vec<DiffNode<'a>>,
-    pub path: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,7 +34,7 @@ pub struct DiffResult<'a> {
 }
 
 pub fn compare<'a>(left: &'a YamNode, right: &'a YamNode) -> DiffResult<'a> {
-    let root = compare_nodes(Some(left), Some(right), "$");
+    let root = compare_nodes(Some(left), Some(right));
     let mut summary = DiffSummary::default();
     if let Some(root) = &root {
         walk_summary(root, &mut summary);
@@ -84,7 +83,6 @@ pub fn render_summary(summary: &DiffSummary) -> String {
 fn compare_nodes<'a>(
     left: Option<&'a YamNode>,
     right: Option<&'a YamNode>,
-    path: &str,
 ) -> Option<DiffNode<'a>> {
     match (left, right) {
         (None, None) => None,
@@ -93,26 +91,20 @@ fn compare_nodes<'a>(
             right: Some(right),
             diff_type: DiffType::Added,
             children: Vec::new(),
-            path: path.to_string(),
         }),
         (Some(left), None) => Some(DiffNode {
             left: Some(left),
             right: None,
             diff_type: DiffType::Removed,
             children: Vec::new(),
-            path: path.to_string(),
         }),
-        (Some(left), Some(right)) => compare_present_nodes(left, right, path),
+        (Some(left), Some(right)) => compare_present_nodes(left, right),
     }
 }
 
-fn compare_present_nodes<'a>(
-    left: &'a YamNode,
-    right: &'a YamNode,
-    path: &str,
-) -> Option<DiffNode<'a>> {
+fn compare_present_nodes<'a>(left: &'a YamNode, right: &'a YamNode) -> Option<DiffNode<'a>> {
     if left.kind == NodeKind::Document && right.kind == NodeKind::Document {
-        return compare_nodes(left.children.first(), right.children.first(), path);
+        return compare_nodes(left.children.first(), right.children.first());
     }
 
     if left.kind == NodeKind::Mapping && right.kind == NodeKind::Mapping {
@@ -136,11 +128,9 @@ fn compare_present_nodes<'a>(
         let mut has_changes = false;
 
         for key in keys {
-            let child_path = format!("{path}.{key}");
             if let Some(child_diff) = compare_nodes(
                 left_by_key.get(key).copied(),
                 right_by_key.get(key).copied(),
-                &child_path,
             ) {
                 has_changes |= child_diff.diff_type != DiffType::Unchanged;
                 children.push(child_diff);
@@ -156,7 +146,6 @@ fn compare_present_nodes<'a>(
                 DiffType::Unchanged
             },
             children,
-            path: path.to_string(),
         });
     }
 
@@ -166,9 +155,7 @@ fn compare_present_nodes<'a>(
         let mut has_changes = false;
 
         for idx in 0..max_len {
-            let child_path = format!("{path}[{idx}]");
-            if let Some(child_diff) =
-                compare_nodes(left.children.get(idx), right.children.get(idx), &child_path)
+            if let Some(child_diff) = compare_nodes(left.children.get(idx), right.children.get(idx))
             {
                 has_changes |= child_diff.diff_type != DiffType::Unchanged;
                 children.push(child_diff);
@@ -184,7 +171,6 @@ fn compare_present_nodes<'a>(
                 DiffType::Unchanged
             },
             children,
-            path: path.to_string(),
         });
     }
 
@@ -198,7 +184,6 @@ fn compare_present_nodes<'a>(
                 DiffType::Modified
             },
             children: Vec::new(),
-            path: path.to_string(),
         });
     }
 
@@ -211,7 +196,6 @@ fn compare_present_nodes<'a>(
             DiffType::Modified
         },
         children: Vec::new(),
-        path: path.to_string(),
     })
 }
 

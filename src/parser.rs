@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Context, Result};
-use indexmap::IndexMap;
 use serde_json::Number;
 use std::fs::File;
 use std::io::Read;
@@ -66,14 +65,6 @@ impl YamNode {
                     _ => ScalarType::String,
                 }
             }
-        }
-    }
-
-    pub fn path_string(&self) -> String {
-        if self.path.is_empty() {
-            "$".to_string()
-        } else {
-            format!("$.{}", self.path.join("."))
         }
     }
 
@@ -572,18 +563,6 @@ pub fn node_to_ordered_yaml(node: &YamNode, sort_keys: bool) -> serde_yaml::Valu
             ScalarType::String => serde_yaml::Value::String(node.value.clone().unwrap_or_default()),
         },
     }
-}
-
-pub fn ordered_map_from_node(node: &YamNode) -> IndexMap<String, serde_json::Value> {
-    let mut map = IndexMap::new();
-    if node.kind == NodeKind::Mapping {
-        for child in &node.children {
-            if let Some(key) = &child.key {
-                map.insert(key.clone(), to_json_value(child));
-            }
-        }
-    }
-    map
 }
 
 #[cfg(test)]
