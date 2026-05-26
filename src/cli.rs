@@ -2,6 +2,7 @@ use crate::diff;
 use crate::format::{format_yaml, FormatOptions};
 use crate::parser::{get_by_path, parse_file, parse_json, parse_yaml, to_json_value, to_raw_value};
 use crate::renderer::{self, TreeStyle};
+use crate::tui;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
@@ -15,19 +16,24 @@ use std::path::{Path, PathBuf};
     about = "A beautiful YAML renderer for the terminal"
 )]
 struct Cli {
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long, help = "Interactive TUI mode")]
     interactive: bool,
 
-    #[arg(short = 's', long, default_value = "unicode")]
+    #[arg(
+        short = 's',
+        long,
+        default_value = "unicode",
+        help = "Tree style: unicode, ascii, indent"
+    )]
     style: String,
 
-    #[arg(short = 't', long)]
+    #[arg(short = 't', long, help = "Show type annotations")]
     types: bool,
 
-    #[arg(short = 'j', long)]
+    #[arg(short = 'j', long, help = "Output as JSON")]
     json: bool,
 
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, help = "Output raw value without decoration")]
     raw: bool,
 
     #[command(subcommand)]
@@ -48,13 +54,22 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct FmtArgs {
-    #[arg(short = 'w', long)]
+    #[arg(
+        short = 'w',
+        long,
+        help = "Write result to source file instead of stdout"
+    )]
     write: bool,
 
-    #[arg(short = 'i', long, default_value_t = 2)]
+    #[arg(
+        short = 'i',
+        long,
+        default_value_t = 2,
+        help = "Indentation width in spaces"
+    )]
     indent: usize,
 
-    #[arg(short = 's', long)]
+    #[arg(short = 's', long, help = "Sort keys alphabetically")]
     sort_keys: bool,
 
     file: Option<PathBuf>,
@@ -62,10 +77,10 @@ struct FmtArgs {
 
 #[derive(Debug, Args)]
 struct DiffArgs {
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long, help = "Interactive TUI mode with split view")]
     interactive: bool,
 
-    #[arg(short = 's', long)]
+    #[arg(short = 's', long, help = "Show only summary (no detailed diff)")]
     summary: bool,
 
     file1: PathBuf,
@@ -85,9 +100,6 @@ fn run_with(cli: Cli) -> Result<i32> {
 }
 
 fn run_root(cli: Cli) -> Result<i32> {
-    if cli.interactive {
-        bail!("interactive TUI is not implemented in the Rust port yet");
-    }
     if cli.args.len() > 2 {
         bail!("accepts at most 2 positional arguments: [path] [file]");
     }
@@ -108,6 +120,16 @@ fn run_root(cli: Cli) -> Result<i32> {
         node = get_by_path(&node, &path_query)?.clone();
     }
 
+    let style = parse_tree_style(&cli.style);
+    if cli.interactive {
+        let display_name = filename
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "stdin".to_string());
+        tui::run_tree(node, filename, display_name, style, cli.types)?;
+        return Ok(0);
+    }
+
     if cli.raw {
         println!("{}", to_raw_value(&node));
         return Ok(0);
@@ -118,7 +140,6 @@ fn run_root(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
-    let style = parse_tree_style(&cli.style);
     print!("{}", renderer::render(&node, style, cli.types));
     Ok(0)
 }
@@ -151,15 +172,16 @@ fn run_fmt(args: FmtArgs) -> Result<i32> {
 }
 
 fn run_diff(args: DiffArgs) -> Result<i32> {
-    if args.interactive {
-        bail!("interactive diff TUI is not implemented in the Rust port yet");
-    }
-
     let left = parse_file(&args.file1)?;
     let right = parse_file(&args.file2)?;
     let mut result = diff::compare(&left, &right);
     result.left_file = args.file1.display().to_string();
     result.right_file = args.file2.display().to_string();
+
+    if args.interactive {
+        tui::run_diff(&result)?;
+        return Ok(0);
+    }
 
     if args.summary {
         println!("{}", diff::render_summary(&result.summary));

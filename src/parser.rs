@@ -76,6 +76,13 @@ impl YamNode {
             format!("$.{}", self.path.join("."))
         }
     }
+
+    pub fn is_container(&self) -> bool {
+        matches!(
+            self.kind,
+            NodeKind::Document | NodeKind::Mapping | NodeKind::Sequence
+        )
+    }
 }
 
 pub fn parse_file(path: impl AsRef<Path>) -> Result<YamNode> {
@@ -191,6 +198,51 @@ pub fn get_by_path<'a>(root: &'a YamNode, path: &str) -> Result<&'a YamNode> {
     }
 
     Ok(current)
+}
+
+pub fn get_by_segments<'a>(root: &'a YamNode, segments: &[String]) -> Option<&'a YamNode> {
+    let mut current = if root.kind == NodeKind::Document && !root.children.is_empty() {
+        &root.children[0]
+    } else {
+        root
+    };
+
+    for segment in segments {
+        current = match current.kind {
+            NodeKind::Mapping => current
+                .children
+                .iter()
+                .find(|child| child.key.as_deref() == Some(segment.as_str()))?,
+            NodeKind::Sequence => current.children.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+
+    Some(current)
+}
+
+pub fn get_by_segments_mut<'a>(
+    root: &'a mut YamNode,
+    segments: &[String],
+) -> Option<&'a mut YamNode> {
+    let mut current = if root.kind == NodeKind::Document && !root.children.is_empty() {
+        &mut root.children[0]
+    } else {
+        root
+    };
+
+    for segment in segments {
+        current = match current.kind {
+            NodeKind::Mapping => current
+                .children
+                .iter_mut()
+                .find(|child| child.key.as_deref() == Some(segment.as_str()))?,
+            NodeKind::Sequence => current.children.get_mut(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+
+    Some(current)
 }
 
 pub fn to_json_value(node: &YamNode) -> serde_json::Value {

@@ -5,7 +5,7 @@
 
 **A beautiful YAML viewer for the terminal.**
 
-Tree visualization, path extraction, YAML/JSON conversion, formatting, and structural diffing.
+Tree visualization, syntax highlighting, interactive TUI mode with inline editing.
 
 ![yam demo](demo.gif)
 
@@ -15,13 +15,12 @@ Tree visualization, path extraction, YAML/JSON conversion, formatting, and struc
 |---------|-------------|
 | **Tree View** | Beautiful tree visualization (Unicode/ASCII/Indent styles) |
 | **Type Annotations** | Optional scalar type labels |
+| **Interactive TUI** | Navigate, fold/unfold, search with vim-like keybindings |
+| **Inline Editing** | Edit scalar values directly in TUI mode |
 | **Path Extraction** | Query values with JSONPath-like syntax |
 | **JSON Support** | Bidirectional YAML/JSON conversion |
 | **Formatting** | Format YAML files with consistent styling |
 | **Diff** | Structural comparison between YAML/JSON files |
-
-> Note: the Rust port currently implements the non-interactive CLI. `-i/--interactive`
-> and `yam diff -i` return an explicit unsupported error until the TUI is rebuilt.
 
 ## Installation
 
@@ -39,6 +38,9 @@ cd yam && cargo build --release
 ```bash
 # View a YAML file
 yam config.yaml
+
+# Interactive TUI mode
+yam -i config.yaml
 
 # Pipe from stdin
 cat config.yaml | yam
@@ -65,7 +67,7 @@ yam diff config-dev.yaml config-prod.yaml
 yam [flags] [path] [file]
 
 Flags:
-  -i, --interactive    Interactive TUI mode (not implemented in Rust port yet)
+  -i, --interactive    Interactive TUI mode
   -s, --style string   Tree style: unicode, ascii, indent (default "unicode")
   -t, --types          Show type annotations
   -j, --json           Output as JSON
@@ -93,7 +95,7 @@ Flags:
 yam diff [flags] <file1> <file2>
 
 Flags:
-  -i, --interactive   Interactive TUI mode with split view (not implemented in Rust port yet)
+  -i, --interactive   Interactive TUI mode with split view
   -s, --summary       Show only summary (no detailed diff)
 ```
 
@@ -102,7 +104,7 @@ Flags:
 ### View Kubernetes ConfigMap
 
 ```bash
-kubectl get configmap my-config -o yaml | yam
+kubectl get configmap my-config -o yaml | yam -i
 ```
 
 ### Extract nested value
@@ -135,9 +137,72 @@ yam fmt --sort-keys config.yaml > config-sorted.yaml
 yam diff config-dev.yaml config-prod.yaml
 ```
 
+### Interactive diff with split view
+
+```bash
+yam diff -i config-dev.yaml config-prod.yaml
+```
+
+## TUI Keybindings
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move down |
+| `k` / `↑` | Move up |
+| `g` / `Home` | Go to top |
+| `G` / `End` | Go to bottom |
+| `Ctrl+d` | Half page down |
+| `Ctrl+u` | Half page up |
+
+### Folding
+
+| Key | Action |
+|-----|--------|
+| `Enter` / `o` | Toggle fold |
+| `O` | Expand all |
+| `C` | Collapse all |
+
+### Search
+
+| Key | Action |
+|-----|--------|
+| `/` | Start search |
+| `n` | Next match |
+| `N` | Previous match |
+| `Esc` | Cancel search |
+
+### Editing
+
+| Key | Action |
+|-----|--------|
+| `e` | Edit value |
+| `Enter` | Confirm edit |
+| `Esc` | Cancel edit |
+| `Ctrl+s` | Save file |
+| `u` | Undo |
+| `Ctrl+r` | Redo |
+
+### Diff TUI
+
+| Key | Action |
+|-----|--------|
+| `n` / `]` | Next diff |
+| `N` / `[` | Previous diff |
+| `q` / `Esc` | Quit |
+
+### Other
+
+| Key | Action |
+|-----|--------|
+| `?` | Toggle help |
+| `q` | Quit |
+
 ## Built With
 
 - [clap](https://docs.rs/clap/) - CLI parser
+- [crossterm](https://docs.rs/crossterm/) - Terminal UI
 - [serde_yaml](https://docs.rs/serde_yaml/) - YAML parser/emitter
 - [serde_json](https://docs.rs/serde_json/) - JSON parser/emitter
 

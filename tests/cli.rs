@@ -67,14 +67,12 @@ fn fmt_sorts_keys() {
 }
 
 #[test]
-fn interactive_mode_is_explicitly_unsupported() {
+fn help_lists_interactive_mode() {
     yam()
-        .args(["--interactive", "testdata/sample.yaml"])
+        .args(["--help"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "interactive TUI is not implemented",
-        ));
+        .success()
+        .stdout(predicate::str::contains("--interactive"));
 }
 
 fn temp_file(name: &str) -> PathBuf {
