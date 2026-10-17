@@ -1,4 +1,5 @@
 use crate::parser::{NodeKind, ScalarType, YamNode};
+use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy)]
 pub enum TreeStyle {
@@ -15,21 +16,23 @@ struct TreeChars {
     tee: &'static str,
 }
 
-pub fn render(root: &YamNode, style: TreeStyle, show_types: bool) -> String {
-    let mut output = String::new();
-    let chars = chars_for(style);
-    render_node(&mut output, root, "", true, chars, show_types);
-    output
+pub fn render(
+    output: &mut impl Write,
+    root: &YamNode,
+    style: TreeStyle,
+    show_types: bool,
+) -> io::Result<()> {
+    render_node(output, root, "", true, chars_for(style), show_types)
 }
 
 fn render_node(
-    output: &mut String,
+    output: &mut impl Write,
     node: &YamNode,
     prefix: &str,
     is_last: bool,
     chars: TreeChars,
     show_types: bool,
-) {
+) -> io::Result<()> {
     if node.kind == NodeKind::Document {
         for (idx, child) in node.children.iter().enumerate() {
             render_node(
@@ -39,12 +42,12 @@ fn render_node(
                 idx == node.children.len() - 1,
                 chars,
                 show_types,
-            );
+            )?;
         }
-        return;
+        return Ok(());
     }
 
-    render_single_node(output, node, prefix, is_last, chars, show_types);
+    render_single_node(output, node, prefix, is_last, chars, show_types)?;
 
     if node.has_children() {
         let new_prefix = child_prefix(prefix, is_last, node.depth, chars);
@@ -56,38 +59,36 @@ fn render_node(
                 idx == node.children.len() - 1,
                 chars,
                 show_types,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 fn render_single_node(
-    output: &mut String,
+    output: &mut impl Write,
     node: &YamNode,
     prefix: &str,
     is_last: bool,
     chars: TreeChars,
     show_types: bool,
-) {
+) -> io::Result<()> {
     if node.depth > 0 {
-        output.push_str(prefix);
-        output.push_str(if is_last { chars.corner } else { chars.tee });
-        output.push_str(chars.horizontal);
-        output.push(' ');
+        let branch = if is_last { chars.corner } else { chars.tee };
+        write!(output, "{prefix}{branch}{} ", chars.horizontal)?;
     }
 
     if let Some(key) = &node.key {
-        output.push_str(key);
-        output.push_str(": ");
+        write!(output, "{key}: ")?;
     } else if node.depth > 0 {
-        output.push_str(&format!("[{}] ", node.index));
+        write!(output, "[{}] ", node.index)?;
     }
 
     match node.kind {
         NodeKind::Mapping | NodeKind::Sequence | NodeKind::Document => {}
-        NodeKind::Scalar => output.push_str(&render_value(node, show_types)),
+        NodeKind::Scalar => output.write_all(render_value(node, show_types).as_bytes())?,
     }
-    output.push('\n');
+    output.write_all(b"\n")
 }
 
 fn render_value(node: &YamNode, show_types: bool) -> String {

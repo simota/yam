@@ -1,12 +1,14 @@
 use crate::diff;
 use crate::format::{format_yaml, FormatOptions};
-use crate::parser::{get_by_path, parse_file, parse_json, parse_yaml, to_json_value, to_raw_value};
+use crate::parser::{
+    get_by_path, parse_file, parse_json, parse_path, parse_yaml, to_json_value, to_raw_value,
+};
 use crate::renderer::{self, TreeStyle};
 use crate::tui;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, BufWriter, IsTerminal, Read, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
@@ -105,19 +107,23 @@ fn run_root(cli: Cli) -> Result<i32> {
     }
 
     let (path_query, filename) = parse_root_args(&cli.args);
-    let input = read_input(filename.as_deref())?;
-    let mut node = if filename
-        .as_deref()
-        .map(crate::parser::is_json_file)
-        .unwrap_or(false)
-    {
-        parse_json(&mut input.as_slice())?
-    } else {
-        parse_yaml(&mut input.as_slice())?
+    let mut node = {
+        let input = read_input(filename.as_deref())?;
+        if filename
+            .as_deref()
+            .map(crate::parser::is_json_file)
+            .unwrap_or(false)
+        {
+            parse_json(&input)?
+        } else {
+            parse_yaml(&input)?
+        }
     };
 
-    if let Some(path_query) = path_query {
-        node = get_by_path(&node, &path_query)?.clone();
+    let mut base_path = Vec::new();
+    if let Some(path_query) = &path_query {
+        node = get_by_path(&node, path_query)?.clone();
+        base_path = parse_path(path_query)?;
     }
 
     let style = parse_tree_style(&cli.style);
@@ -126,7 +132,10 @@ fn run_root(cli: Cli) -> Result<i32> {
             .as_deref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "stdin".to_string());
-        tui::run_tree(node, filename, display_name, style, cli.types)?;
+        // Saving writes the viewed tree back to the file, so a subtree selected
+        // by a path query must stay read-only.
+        let save_target = if path_query.is_some() { None } else { filename };
+        tui::run_tree(node, save_target, display_name, base_path, style, cli.types)?;
         return Ok(0);
     }
 
@@ -135,12 +144,14 @@ fn run_root(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&to_json_value(&node))?);
-        return Ok(0);
-    }
-
-    print!("{}", renderer::render(&node, style, cli.types));
+    write_stdout(|out| {
+        if cli.json {
+            serde_json::to_writer_pretty(&mut *out, &to_json_value(&node))?;
+            writeln!(out)
+        } else {
+            renderer::render(out, &node, style, cli.types)
+        }
+    })?;
     Ok(0)
 }
 
@@ -149,7 +160,7 @@ fn run_fmt(args: FmtArgs) -> Result<i32> {
         bail!("cannot use -w with stdin input");
     }
     let input = read_input(args.file.as_deref())?;
-    let node = parse_yaml(&mut input.as_slice()).context("invalid YAML")?;
+    let node = parse_yaml(&input).context("invalid YAML")?;
     let output = format_yaml(
         &node,
         FormatOptions {
@@ -188,10 +199,26 @@ fn run_diff(args: DiffArgs) -> Result<i32> {
     } else if result.summary.total == 0 {
         println!("No differences found.");
     } else {
-        print!("{}", diff::render(&result));
+        write_stdout(|out| diff::render(out, &result))?;
     }
 
     Ok(if result.summary.total > 0 { 1 } else { 0 })
+}
+
+/// Streams output to stdout. A reader that stops early (`yam big.yaml | head`)
+/// closes the pipe, which ends the output normally.
+fn write_stdout(
+    write: impl FnOnce(&mut BufWriter<StdoutLock<'static>>) -> io::Result<()>,
+) -> Result<()> {
+    let mut out = BufWriter::new(io::stdout().lock());
+    ignore_broken_pipe(write(&mut out).and_then(|()| out.flush()))
+}
+
+fn ignore_broken_pipe(result: io::Result<()>) -> Result<()> {
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => Ok(result?),
+    }
 }
 
 fn parse_root_args(args: &[String]) -> (Option<String>, Option<PathBuf>) {
@@ -235,8 +262,23 @@ fn parse_tree_style(style: &str) -> TreeStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_root_args;
+    use super::{ignore_broken_pipe, parse_root_args};
+    use std::io;
     use std::path::PathBuf;
+
+    #[test]
+    fn only_a_closed_pipe_is_ignored() {
+        assert!(ignore_broken_pipe(Ok(())).is_ok());
+        assert!(ignore_broken_pipe(Err(io::ErrorKind::BrokenPipe.into())).is_ok());
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::Interrupted,
+        ] {
+            let err = ignore_broken_pipe(Err(io::Error::new(kind, "disk full"))).unwrap_err();
+            assert_eq!(err.to_string(), "disk full");
+        }
+    }
 
     #[test]
     fn parses_root_args_like_go_cli() {

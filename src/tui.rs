@@ -1,6 +1,6 @@
 use crate::diff::{DiffNode, DiffResult, DiffType};
 use crate::format::{format_yaml, FormatOptions};
-use crate::parser::{get_by_segments, get_by_segments_mut, NodeKind, ScalarType, YamNode};
+use crate::parser::{NodeKind, ScalarType, YamNode};
 use crate::renderer::TreeStyle;
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -12,19 +12,23 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::Duration;
 
 const MAX_UNDO: usize = 10;
 
-#[derive(Debug, Clone)]
-struct FlatNode {
-    path: Vec<String>,
-    line: String,
+/// A node's place in the preorder walk of the viewed tree. Its index in
+/// `TreeApp::nodes` is the node's id. Edits only replace scalar values, so the
+/// tree's shape and therefore every id stay fixed for the whole session.
+#[derive(Debug, Clone, Copy)]
+struct NodeMeta {
+    parent: Option<usize>,
+    child_index: usize,
+    /// Id one past the last node of this subtree.
+    end: usize,
 }
 
 #[derive(Debug, Clone)]
 struct UndoEntry {
-    path: Vec<String>,
+    id: usize,
     old_value: String,
     new_value: String,
 }
@@ -57,11 +61,12 @@ pub fn run_tree(
     root: YamNode,
     filename: Option<PathBuf>,
     display_name: String,
+    base_path: Vec<String>,
     style: TreeStyle,
     show_types: bool,
 ) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
-    TreeApp::new(root, filename, display_name, style, show_types).run()
+    TreeApp::new(root, filename, display_name, base_path, style, show_types).run()
 }
 
 pub fn run_diff(result: &DiffResult<'_>) -> Result<()> {
@@ -73,24 +78,32 @@ struct TreeApp {
     root: YamNode,
     filename: Option<PathBuf>,
     display_name: String,
+    /// Path of the viewed node inside the file, shown before every row path.
+    base_path: Vec<String>,
     style: TreeStyle,
     show_types: bool,
-    collapsed: HashSet<String>,
+    nodes: Vec<NodeMeta>,
+    /// Ids of the visible nodes in preorder; rebuilt only when folding changes.
+    rows: Vec<usize>,
+    collapsed: HashSet<usize>,
     cursor: usize,
     offset: usize,
     show_help: bool,
     mode: InputMode,
     input: String,
-    edit_path: Vec<String>,
+    edit_id: Option<usize>,
     edit_original: String,
-    modified_paths: HashSet<String>,
+    modified_ids: HashSet<usize>,
     modified: bool,
     quit_armed: bool,
     status: String,
-    matches: Vec<Vec<String>>,
+    /// Ids of the search hits in ascending order.
+    matches: Vec<usize>,
     match_index: usize,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
+    #[cfg(test)]
+    row_builds: usize,
 }
 
 impl TreeApp {
@@ -98,24 +111,30 @@ impl TreeApp {
         root: YamNode,
         filename: Option<PathBuf>,
         display_name: String,
+        base_path: Vec<String>,
         style: TreeStyle,
         show_types: bool,
     ) -> Self {
-        Self {
+        let mut nodes = Vec::new();
+        index_nodes(view_root(&root), None, 0, &mut nodes);
+        let mut app = Self {
             root,
             filename,
             display_name,
+            base_path,
             style,
             show_types,
+            nodes,
+            rows: Vec::new(),
             collapsed: HashSet::new(),
             cursor: 0,
             offset: 0,
             show_help: false,
             mode: InputMode::Normal,
             input: String::new(),
-            edit_path: Vec::new(),
+            edit_id: None,
             edit_original: String::new(),
-            modified_paths: HashSet::new(),
+            modified_ids: HashSet::new(),
             modified: false,
             quit_armed: false,
             status: String::new(),
@@ -123,15 +142,17 @@ impl TreeApp {
             match_index: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-        }
+            #[cfg(test)]
+            row_builds: 0,
+        };
+        app.rebuild_rows();
+        app
     }
 
     fn run(&mut self) -> Result<()> {
         loop {
             self.draw()?;
-            if !event::poll(Duration::from_millis(250))? {
-                continue;
-            }
+            // Block until the next event; any event, a resize included, redraws.
             if let Event::Key(key) = event::read()? {
                 if self.handle_key(key)? {
                     break;
@@ -168,7 +189,6 @@ impl TreeApp {
         }
         self.status.clear();
 
-        let rows = self.flat_nodes();
         match key {
             KeyEvent {
                 code: KeyCode::Char('q'),
@@ -254,7 +274,7 @@ impl TreeApp {
                 code: KeyCode::Char('G'),
                 ..
             } => {
-                self.cursor = rows.len().saturating_sub(1);
+                self.cursor = self.rows.len().saturating_sub(1);
                 self.adjust_offset();
             }
             KeyEvent {
@@ -268,7 +288,10 @@ impl TreeApp {
             KeyEvent {
                 code: KeyCode::Char('O'),
                 ..
-            } => self.collapsed.clear(),
+            } => {
+                self.collapsed.clear();
+                self.rebuild_rows();
+            }
             KeyEvent {
                 code: KeyCode::Char('C'),
                 ..
@@ -279,6 +302,7 @@ impl TreeApp {
             } => {
                 self.mode = InputMode::Search;
                 self.input.clear();
+                self.matches.clear();
             }
             KeyEvent {
                 code: KeyCode::Char('n'),
@@ -342,7 +366,7 @@ impl TreeApp {
             } => {
                 self.mode = InputMode::Normal;
                 self.input.clear();
-                self.edit_path.clear();
+                self.edit_id = None;
                 self.edit_original.clear();
             }
             KeyEvent {
@@ -374,8 +398,7 @@ impl TreeApp {
 
     fn draw(&mut self) -> Result<()> {
         let (width, height) = terminal::size()?;
-        let rows = self.flat_nodes();
-        self.clamp_cursor(rows.len());
+        self.clamp_cursor();
         self.adjust_offset();
 
         let mut stdout = io::stdout();
@@ -396,23 +419,25 @@ impl TreeApp {
         for line_idx in 0..viewport {
             let row_idx = self.offset + line_idx;
             queue!(stdout, MoveTo(0, (line_idx + 1) as u16))?;
-            if row_idx >= rows.len() {
+            let Some(&id) = self.rows.get(row_idx) else {
                 continue;
-            }
-            let row = &rows[row_idx];
+            };
             if row_idx == self.cursor {
                 queue!(stdout, SetAttribute(Attribute::Reverse))?;
-            } else if self.modified_paths.contains(&path_key(&row.path)) {
+            } else if self.modified_ids.contains(&id) {
                 queue!(stdout, SetForegroundColor(Color::Yellow))?;
-            } else if self.matches.iter().any(|path| path == &row.path) {
+            } else if self.is_match(id) {
                 queue!(stdout, SetForegroundColor(Color::DarkYellow))?;
             }
-            queue!(stdout, Print(truncate(&row.line, width as usize)))?;
+            queue!(
+                stdout,
+                Print(truncate(&self.render_node_line(id), width as usize))
+            )?;
             queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
         }
 
         let footer_y = height.saturating_sub(2);
-        let footer = self.footer_text(rows.len());
+        let footer = self.footer_text();
         draw_bar(&mut stdout, footer_y, width, &footer, Color::DarkGrey)?;
 
         queue!(stdout, MoveTo(0, height.saturating_sub(1)))?;
@@ -426,7 +451,7 @@ impl TreeApp {
         Ok(())
     }
 
-    fn footer_text(&self, total: usize) -> String {
+    fn footer_text(&self) -> String {
         match self.mode {
             InputMode::Search => {
                 let suffix = if self.input.is_empty() {
@@ -441,11 +466,10 @@ impl TreeApp {
             InputMode::Edit => format!("Edit: {}  [Enter: confirm, Esc: cancel]", self.input),
             InputMode::Normal if !self.status.is_empty() => self.status.clone(),
             InputMode::Normal => {
-                let rows = self.flat_nodes();
-                let pos = format!("{}/{}", self.cursor.saturating_add(1), total);
-                let path = rows
-                    .get(self.cursor)
-                    .map(|row| display_path(&row.path))
+                let pos = format!("{}/{}", self.cursor.saturating_add(1), self.rows.len());
+                let path = self
+                    .current_id()
+                    .map(|id| self.display_path(id))
                     .unwrap_or_else(|| "$".into());
                 let mut text = format!("{pos} | {path}");
                 if !self.matches.is_empty() {
@@ -463,32 +487,65 @@ impl TreeApp {
         }
     }
 
-    fn flat_nodes(&self) -> Vec<FlatNode> {
-        let mut rows = Vec::new();
-        let root = if self.root.kind == NodeKind::Document {
-            self.root.children.first()
+    fn rebuild_rows(&mut self) {
+        #[cfg(test)]
+        {
+            self.row_builds += 1;
+        }
+        self.rows.clear();
+        let mut id = 0;
+        while id < self.nodes.len() {
+            self.rows.push(id);
+            id = if self.collapsed.contains(&id) {
+                self.nodes[id].end
+            } else {
+                id + 1
+            };
+        }
+    }
+
+    /// Child indices leading from the viewed root to `id`.
+    fn child_indices(&self, mut id: usize) -> Vec<usize> {
+        let mut indices = Vec::new();
+        while let Some(parent) = self.nodes[id].parent {
+            indices.push(self.nodes[id].child_index);
+            id = parent;
+        }
+        indices.reverse();
+        indices
+    }
+
+    fn node(&self, id: usize) -> &YamNode {
+        self.child_indices(id)
+            .into_iter()
+            .fold(view_root(&self.root), |node, idx| &node.children[idx])
+    }
+
+    fn node_mut(&mut self, id: usize) -> &mut YamNode {
+        let indices = self.child_indices(id);
+        indices
+            .into_iter()
+            .fold(view_root_mut(&mut self.root), |node, idx| {
+                &mut node.children[idx]
+            })
+    }
+
+    fn display_path(&self, id: usize) -> String {
+        let mut segments = self.base_path.clone();
+        let mut node = view_root(&self.root);
+        for idx in self.child_indices(id) {
+            node = &node.children[idx];
+            segments.push(node.key.clone().unwrap_or_else(|| idx.to_string()));
+        }
+        if segments.is_empty() {
+            "$".into()
         } else {
-            Some(&self.root)
-        };
-        if let Some(root) = root {
-            self.collect_visible(root, &mut rows);
-        }
-        rows
-    }
-
-    fn collect_visible(&self, node: &YamNode, rows: &mut Vec<FlatNode>) {
-        rows.push(FlatNode {
-            path: node.path.clone(),
-            line: self.render_node_line(node),
-        });
-        if node.has_children() && !self.collapsed.contains(&path_key(&node.path)) {
-            for child in &node.children {
-                self.collect_visible(child, rows);
-            }
+            format!("$.{}", segments.join("."))
         }
     }
 
-    fn render_node_line(&self, node: &YamNode) -> String {
+    fn render_node_line(&self, id: usize) -> String {
+        let node = self.node(id);
         let depth = node.depth.saturating_sub(1);
         let indent = "  ".repeat(depth);
         let indicator = if node.has_children() {
@@ -496,7 +553,7 @@ impl TreeApp {
                 TreeStyle::Unicode => ("▶ ", "▼ "),
                 TreeStyle::Ascii | TreeStyle::Indent => ("+ ", "- "),
             };
-            if self.collapsed.contains(&path_key(&node.path)) {
+            if self.collapsed.contains(&id) {
                 collapsed
             } else {
                 expanded
@@ -528,8 +585,12 @@ impl TreeApp {
         format!("{indent}{indicator}{name}{value}")
     }
 
+    fn is_match(&self, id: usize) -> bool {
+        self.matches.binary_search(&id).is_ok()
+    }
+
     fn move_cursor(&mut self, delta: isize) {
-        let len = self.flat_nodes().len();
+        let len = self.rows.len();
         if len == 0 {
             self.cursor = 0;
             self.offset = 0;
@@ -540,7 +601,8 @@ impl TreeApp {
         self.adjust_offset();
     }
 
-    fn clamp_cursor(&mut self, len: usize) {
+    fn clamp_cursor(&mut self) {
+        let len = self.rows.len();
         if len == 0 {
             self.cursor = 0;
         } else if self.cursor >= len {
@@ -559,92 +621,80 @@ impl TreeApp {
 
     fn viewport_height(&self) -> usize {
         terminal::size()
-            .map(|(_, h)| h.saturating_sub(3).max(1) as usize)
+            .map(|(_, h)| viewport_rows(h))
             .unwrap_or(20)
     }
 
-    fn current_path(&self) -> Option<Vec<String>> {
-        self.flat_nodes()
-            .get(self.cursor)
-            .map(|row| row.path.clone())
+    fn current_id(&self) -> Option<usize> {
+        self.rows.get(self.cursor).copied()
     }
 
     fn toggle_current(&mut self) {
-        let Some(path) = self.current_path() else {
+        let Some(id) = self.current_id() else {
             return;
         };
-        let Some(node) = get_by_segments(&self.root, &path) else {
-            return;
-        };
+        let node = self.node(id);
         if !node.is_container() || !node.has_children() {
             return;
         }
-        let key = path_key(&path);
-        if !self.collapsed.remove(&key) {
-            self.collapsed.insert(key);
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
         }
+        self.rebuild_rows();
     }
 
     fn collapse_all(&mut self) {
-        self.collapsed.clear();
-        let mut paths = Vec::new();
-        collect_container_paths(&self.root, &mut paths);
-        for path in paths {
-            if !path.is_empty() {
-                self.collapsed.insert(path_key(&path));
-            }
-        }
+        // A subtree with more than one node is a container with children; the
+        // viewed root (id 0) stays expanded.
+        self.collapsed = (1..self.nodes.len())
+            .filter(|&id| self.nodes[id].end > id + 1)
+            .collect();
         self.cursor = 0;
         self.offset = 0;
+        self.rebuild_rows();
     }
 
     fn start_edit(&mut self) {
-        let Some(path) = self.current_path() else {
+        let Some(id) = self.current_id() else {
             return;
         };
-        let Some(node) = get_by_segments(&self.root, &path) else {
-            return;
-        };
+        let node = self.node(id);
         if node.kind != NodeKind::Scalar {
             self.status = "Cannot edit: not a scalar value".into();
             return;
         }
         if self.filename.is_none() {
-            self.status = "Cannot edit: read-only (stdin)".into();
+            self.status = "Cannot edit: read-only".into();
             return;
         }
-        self.mode = InputMode::Edit;
-        self.edit_path = path;
         self.edit_original = node.value.clone().unwrap_or_default();
+        self.mode = InputMode::Edit;
+        self.edit_id = Some(id);
         self.input = self.edit_original.clone();
     }
 
     fn confirm_edit(&mut self) {
-        if self.input == self.edit_original {
-            self.input.clear();
-            self.edit_path.clear();
-            self.edit_original.clear();
+        let input = std::mem::take(&mut self.input);
+        let original = std::mem::take(&mut self.edit_original);
+        let Some(id) = self.edit_id.take() else {
+            return;
+        };
+        if input == original {
             return;
         }
-        if let Some(node) = get_by_segments_mut(&mut self.root, &self.edit_path) {
-            node.value = Some(self.input.clone());
-            let entry = UndoEntry {
-                path: self.edit_path.clone(),
-                old_value: self.edit_original.clone(),
-                new_value: self.input.clone(),
-            };
-            self.push_undo(entry);
-            self.modified = true;
-            self.modified_paths.insert(path_key(&self.edit_path));
-        }
-        self.input.clear();
-        self.edit_path.clear();
-        self.edit_original.clear();
+        self.node_mut(id).value = Some(input.clone());
+        self.push_undo(UndoEntry {
+            id,
+            old_value: original,
+            new_value: input,
+        });
+        self.modified = true;
+        self.modified_ids.insert(id);
     }
 
     fn save_file(&mut self) -> Result<()> {
         let Some(path) = &self.filename else {
-            self.status = "Cannot save: read-only (stdin)".into();
+            self.status = "Cannot save: read-only".into();
             return Ok(());
         };
         if !self.modified {
@@ -655,7 +705,7 @@ impl TreeApp {
         fs::write(path, output)
             .with_context(|| format!("failed to write file: {}", path.display()))?;
         self.modified = false;
-        self.modified_paths.clear();
+        self.modified_ids.clear();
         self.status = "Saved!".into();
         Ok(())
     }
@@ -673,13 +723,11 @@ impl TreeApp {
             self.status = "Nothing to undo".into();
             return;
         };
-        if let Some(node) = get_by_segments_mut(&mut self.root, &entry.path) {
-            node.value = Some(entry.old_value.clone());
-            self.modified = true;
-            self.modified_paths.insert(path_key(&entry.path));
-            self.status = "Undo: restored value".into();
-            self.redo_stack.push(entry);
-        }
+        self.node_mut(entry.id).value = Some(entry.old_value.clone());
+        self.modified = true;
+        self.modified_ids.insert(entry.id);
+        self.status = "Undo: restored value".into();
+        self.redo_stack.push(entry);
     }
 
     fn redo(&mut self) {
@@ -687,13 +735,11 @@ impl TreeApp {
             self.status = "Nothing to redo".into();
             return;
         };
-        if let Some(node) = get_by_segments_mut(&mut self.root, &entry.path) {
-            node.value = Some(entry.new_value.clone());
-            self.modified = true;
-            self.modified_paths.insert(path_key(&entry.path));
-            self.status = "Redo: re-applied value".into();
-            self.undo_stack.push(entry);
-        }
+        self.node_mut(entry.id).value = Some(entry.new_value.clone());
+        self.modified = true;
+        self.modified_ids.insert(entry.id);
+        self.status = "Redo: re-applied value".into();
+        self.undo_stack.push(entry);
     }
 
     fn update_search_matches(&mut self) {
@@ -701,20 +747,23 @@ impl TreeApp {
         if self.input.is_empty() {
             return;
         }
-        let needle = self.input.to_ascii_lowercase();
-        collect_matching_paths(&self.root, &needle, &mut self.matches);
+        let mut next_id = 0;
+        collect_matches(
+            view_root(&self.root),
+            &self.input,
+            &mut next_id,
+            &mut self.matches,
+        );
     }
 
+    /// The matches are already current: every edit of the query recomputes them.
     fn finish_search(&mut self) {
-        self.update_search_matches();
-        if self.matches.is_empty() {
+        let Some(&target) = self.matches.first() else {
             self.status = "No matches".into();
             return;
-        }
+        };
         self.match_index = 0;
-        let target = self.matches[0].clone();
-        self.expand_ancestors(&target);
-        self.jump_to_path(&target);
+        self.jump_to(target);
     }
 
     fn next_match(&mut self) {
@@ -722,9 +771,7 @@ impl TreeApp {
             return;
         }
         self.match_index = (self.match_index + 1) % self.matches.len();
-        let target = self.matches[self.match_index].clone();
-        self.expand_ancestors(&target);
-        self.jump_to_path(&target);
+        self.jump_to(self.matches[self.match_index]);
     }
 
     fn prev_match(&mut self) {
@@ -736,23 +783,21 @@ impl TreeApp {
         } else {
             self.match_index - 1
         };
-        let target = self.matches[self.match_index].clone();
-        self.expand_ancestors(&target);
-        self.jump_to_path(&target);
+        self.jump_to(self.matches[self.match_index]);
     }
 
-    fn expand_ancestors(&mut self, path: &[String]) {
-        for len in 0..path.len() {
-            self.collapsed.remove(&path_key(&path[..len]));
+    /// Expands the ancestors of `id` and moves the cursor onto it.
+    fn jump_to(&mut self, id: usize) {
+        let mut expanded = false;
+        let mut ancestor = self.nodes[id].parent;
+        while let Some(parent) = ancestor {
+            expanded |= self.collapsed.remove(&parent);
+            ancestor = self.nodes[parent].parent;
         }
-    }
-
-    fn jump_to_path(&mut self, target: &[String]) {
-        if let Some(index) = self
-            .flat_nodes()
-            .iter()
-            .position(|row| row.path.as_slice() == target)
-        {
+        if expanded {
+            self.rebuild_rows();
+        }
+        if let Ok(index) = self.rows.binary_search(&id) {
             self.cursor = index;
             self.adjust_offset();
         }
@@ -810,9 +855,7 @@ impl DiffApp {
     fn run(&mut self) -> Result<()> {
         loop {
             self.draw()?;
-            if !event::poll(Duration::from_millis(250))? {
-                continue;
-            }
+            // Block until the next event; any event, a resize included, redraws.
             if let Event::Key(key) = event::read()? {
                 if self.handle_key(key) {
                     break;
@@ -1056,7 +1099,7 @@ impl DiffApp {
 
     fn viewport_height(&self) -> usize {
         terminal::size()
-            .map(|(_, h)| h.saturating_sub(3).max(1) as usize)
+            .map(|(_, h)| viewport_rows(h))
             .unwrap_or(20)
     }
 }
@@ -1116,50 +1159,6 @@ fn format_diff_node(node: &YamNode) -> String {
     }
 }
 
-fn collect_container_paths(node: &YamNode, paths: &mut Vec<Vec<String>>) {
-    if node.is_container() && node.has_children() {
-        paths.push(node.path.clone());
-    }
-    for child in &node.children {
-        collect_container_paths(child, paths);
-    }
-}
-
-fn collect_matching_paths(node: &YamNode, needle: &str, matches: &mut Vec<Vec<String>>) {
-    if node.kind != NodeKind::Document {
-        let key_hit = node
-            .key
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .contains(needle);
-        let value_hit = node
-            .value
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .contains(needle);
-        if key_hit || value_hit {
-            matches.push(node.path.clone());
-        }
-    }
-    for child in &node.children {
-        collect_matching_paths(child, needle, matches);
-    }
-}
-
-fn path_key(path: &[String]) -> String {
-    path.join("\u{1f}")
-}
-
-fn display_path(path: &[String]) -> String {
-    if path.is_empty() {
-        "$".into()
-    } else {
-        format!("$.{}", path.join("."))
-    }
-}
-
 fn type_label(scalar_type: ScalarType) -> &'static str {
     match scalar_type {
         ScalarType::String => "<str>",
@@ -1207,49 +1206,220 @@ fn pad(input: &str, width: usize) -> String {
     }
 }
 
+/// Rows left for content below the header and above the footer and help
+/// lines; at least one, so paging still moves on a tiny terminal.
+fn viewport_rows(terminal_height: u16) -> usize {
+    terminal_height.saturating_sub(3).max(1) as usize
+}
+
+fn view_root(root: &YamNode) -> &YamNode {
+    if root.kind == NodeKind::Document {
+        root.children.first().unwrap_or(root)
+    } else {
+        root
+    }
+}
+
+fn view_root_mut(root: &mut YamNode) -> &mut YamNode {
+    if root.kind == NodeKind::Document && !root.children.is_empty() {
+        &mut root.children[0]
+    } else {
+        root
+    }
+}
+
+/// Numbers the subtree in preorder, matching the ids `collect_matches` assigns.
+fn index_nodes(
+    node: &YamNode,
+    parent: Option<usize>,
+    child_index: usize,
+    nodes: &mut Vec<NodeMeta>,
+) {
+    let id = nodes.len();
+    nodes.push(NodeMeta {
+        parent,
+        child_index,
+        end: 0,
+    });
+    for (idx, child) in node.children.iter().enumerate() {
+        index_nodes(child, Some(id), idx, nodes);
+    }
+    nodes[id].end = nodes.len();
+}
+
+fn collect_matches(node: &YamNode, needle: &str, next_id: &mut usize, matches: &mut Vec<usize>) {
+    let id = *next_id;
+    *next_id += 1;
+    let hit = |text: &Option<String>| {
+        text.as_deref()
+            .is_some_and(|text| contains_ignore_ascii_case(text, needle))
+    };
+    if node.kind != NodeKind::Document && (hit(&node.key) || hit(&node.value)) {
+        matches.push(id);
+    }
+    for child in &node.children {
+        collect_matches(child, needle, next_id, matches);
+    }
+}
+
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_yaml_str;
+    use crate::parser::{get_by_path, parse_yaml_str};
+
+    fn app(yaml: &str) -> TreeApp {
+        TreeApp::new(
+            parse_yaml_str(yaml).unwrap(),
+            Some(PathBuf::from("x.yaml")),
+            "x.yaml".into(),
+            Vec::new(),
+            TreeStyle::Unicode,
+            false,
+        )
+    }
+
+    fn press(app: &mut TreeApp, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .unwrap();
+    }
 
     #[test]
     fn tree_app_flattens_collapsed_nodes() {
-        let root = parse_yaml_str("a:\n  b: 1\nc: 2\n").unwrap();
-        let mut app = TreeApp::new(root, None, "stdin".into(), TreeStyle::Unicode, false);
-        assert_eq!(app.flat_nodes().len(), 4);
-        app.collapsed.insert(path_key(&["a".to_string()]));
-        assert_eq!(app.flat_nodes().len(), 3);
+        let mut app = app("a:\n  b: 1\nc: 2\n");
+        assert_eq!(app.rows.len(), 4);
+        app.cursor = 1;
+        app.toggle_current();
+        assert_eq!(app.rows.len(), 3);
+        assert_eq!(app.render_node_line(1), "▶ a:");
     }
 
     #[test]
     fn tree_app_edits_scalar_and_tracks_undo() {
-        let root = parse_yaml_str("a: old\n").unwrap();
-        let mut app = TreeApp::new(
-            root,
-            Some(PathBuf::from("x.yaml")),
-            "x.yaml".into(),
-            TreeStyle::Unicode,
-            false,
-        );
-        app.edit_path = vec!["a".into()];
+        let mut app = app("a: old\n");
+        app.edit_id = Some(1);
         app.edit_original = "old".into();
         app.input = "new".into();
         app.confirm_edit();
 
         assert_eq!(
-            get_by_segments(&app.root, &["a".into()])
-                .unwrap()
-                .value
-                .as_deref(),
+            get_by_path(&app.root, ".a").unwrap().value.as_deref(),
             Some("new")
         );
+        assert!(app.modified_ids.contains(&1));
         app.undo();
         assert_eq!(
-            get_by_segments(&app.root, &["a".into()])
-                .unwrap()
-                .value
-                .as_deref(),
+            get_by_path(&app.root, ".a").unwrap().value.as_deref(),
             Some("old")
         );
+    }
+
+    #[test]
+    fn navigation_reuses_rows_regardless_of_document_size() {
+        for size in [10, 10_000] {
+            let yaml: String = (0..size).map(|i| format!("k{i}:\n  v: {i}\n")).collect();
+            let mut app = app(&yaml);
+            assert_eq!(app.rows.len(), 1 + 2 * size);
+            for _ in 0..100 {
+                press(&mut app, KeyCode::Char('j'));
+            }
+            press(&mut app, KeyCode::Char('G'));
+            press(&mut app, KeyCode::Char('g'));
+            assert_eq!(app.row_builds, 1, "size {size}");
+
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(app.row_builds, 2, "size {size}");
+            assert_eq!(app.rows.len(), 2 * size);
+        }
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_jumps_through_collapsed_nodes() {
+        let mut app = app("Name: x\nitems:\n  - name: first\n  - other: NAMED\n");
+        app.collapse_all();
+        press(&mut app, KeyCode::Char('/'));
+        for ch in "nAmE".chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        // Ids: 0 root, 1 Name, 2 items, 3 [0], 4 name, 5 [1], 6 other.
+        assert_eq!(app.matches, vec![1, 4, 6]);
+        assert!(app.is_match(4) && !app.is_match(3));
+
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.current_id(), Some(4));
+        assert_eq!(app.display_path(4), "$.items.0.name");
+    }
+
+    #[test]
+    fn viewport_rows_keep_one_row_on_tiny_terminals() {
+        for (height, rows) in [
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 2),
+            (u16::MAX, 65532),
+        ] {
+            assert_eq!(viewport_rows(height), rows, "height {height}");
+        }
+    }
+
+    #[test]
+    fn empty_document_is_a_single_null_row() {
+        let mut app = app("");
+        assert_eq!(app.rows, vec![0]);
+        assert_eq!(app.render_node_line(0), "  null");
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('G'),
+            KeyCode::Enter,
+        ] {
+            press(&mut app, code);
+        }
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.row_builds, 1, "a scalar root cannot be folded");
+    }
+
+    #[test]
+    fn row_names_follow_depth_boundaries() {
+        // Depth 0: the root has no key and no index; depth 1 and below show an
+        // index for sequence items and indent one level less than their depth.
+        let app = app("- a\n- [b]\n");
+        let lines: Vec<String> = app
+            .rows
+            .iter()
+            .map(|&id| app.render_node_line(id))
+            .collect();
+        assert_eq!(lines, ["▼ ", "  [0] a", "▼ [1]", "    [0] b"]);
+
+        assert_eq!(self::app("42\n").render_node_line(0), "  42");
+        assert_eq!(self::app("a: 1\n").render_node_line(1), "  a: 1");
+    }
+
+    #[test]
+    fn display_path_includes_the_queried_base_path() {
+        let root = parse_yaml_str("metadata:\n  name: yam\n").unwrap();
+        let node = get_by_path(&root, ".metadata").unwrap().clone();
+        let app = TreeApp::new(
+            node,
+            None,
+            "x.yaml".into(),
+            vec!["metadata".into()],
+            TreeStyle::Unicode,
+            false,
+        );
+        assert_eq!(app.display_path(0), "$.metadata");
+        assert_eq!(app.display_path(1), "$.metadata.name");
     }
 }
