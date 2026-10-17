@@ -1,5 +1,6 @@
 use crate::parser::{NodeKind, YamNode};
 use std::collections::{BTreeSet, HashMap};
+use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffType {
@@ -49,24 +50,21 @@ pub fn compare<'a>(left: &'a YamNode, right: &'a YamNode) -> DiffResult<'a> {
     }
 }
 
-pub fn render(result: &DiffResult<'_>) -> String {
-    let mut output = String::new();
+pub fn render(output: &mut impl Write, result: &DiffResult<'_>) -> io::Result<()> {
     if !result.left_file.is_empty() || !result.right_file.is_empty() {
-        output.push_str(&format!("--- {}\n", result.left_file));
-        output.push_str(&format!("+++ {}\n\n", result.right_file));
+        writeln!(output, "--- {}", result.left_file)?;
+        writeln!(output, "+++ {}\n", result.right_file)?;
     }
 
     if let Some(root) = &result.root {
-        render_diff_node(&mut output, root, "");
+        render_diff_node(output, root, "")?;
     }
 
     if result.summary.total > 0 {
-        output.push('\n');
-        output.push_str(&render_summary(&result.summary));
-        output.push('\n');
+        writeln!(output, "\n{}", render_summary(&result.summary))?;
     }
 
-    output
+    Ok(())
 }
 
 pub fn render_summary(summary: &DiffSummary) -> String {
@@ -211,23 +209,23 @@ fn walk_summary(node: &DiffNode<'_>, summary: &mut DiffSummary) {
     }
 }
 
-fn render_diff_node(output: &mut String, node: &DiffNode<'_>, indent: &str) {
+fn render_diff_node(output: &mut impl Write, node: &DiffNode<'_>, indent: &str) -> io::Result<()> {
     if node.diff_type == DiffType::Unchanged && !has_changes(node) {
-        return;
+        return Ok(());
     }
     if is_document_node(node) {
         for child in &node.children {
-            render_diff_node(output, child, indent);
+            render_diff_node(output, child, indent)?;
         }
-        return;
+        return Ok(());
     }
 
     let key = node_key(node);
     if key.is_empty() && is_container_node(node) {
         for child in &node.children {
-            render_diff_node(output, child, indent);
+            render_diff_node(output, child, indent)?;
         }
-        return;
+        return Ok(());
     }
 
     let prefix = match node.diff_type {
@@ -238,20 +236,22 @@ fn render_diff_node(output: &mut String, node: &DiffNode<'_>, indent: &str) {
     };
 
     if node.diff_type == DiffType::Modified && is_scalar_node(node) {
-        output.push_str(&format!(
-            "{prefix}{indent}{key}: {} -> {}\n",
+        writeln!(
+            output,
+            "{prefix}{indent}{key}: {} -> {}",
             scalar_value(node.left),
             scalar_value(node.right)
-        ));
+        )?;
     } else if is_container_node(node) {
-        output.push_str(&format!("{prefix}{indent}{key}:\n"));
+        writeln!(output, "{prefix}{indent}{key}:")?;
         let child_indent = format!("{indent}  ");
         for child in &node.children {
-            render_diff_node(output, child, &child_indent);
+            render_diff_node(output, child, &child_indent)?;
         }
     } else {
-        output.push_str(&format!("{prefix}{indent}{key}: {}\n", node_value(node)));
+        writeln!(output, "{prefix}{indent}{key}: {}", node_value(node))?;
     }
+    Ok(())
 }
 
 fn has_changes(node: &DiffNode<'_>) -> bool {

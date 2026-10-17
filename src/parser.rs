@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Number;
-use std::fs::File;
-use std::io::Read;
+use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +27,6 @@ pub struct YamNode {
     pub tag: Option<String>,
     pub children: Vec<YamNode>,
     pub depth: usize,
-    pub path: Vec<String>,
     pub index: usize,
 }
 
@@ -41,7 +39,6 @@ impl YamNode {
             tag: None,
             children: vec![child],
             depth: 0,
-            path: Vec::new(),
             index: 0,
         }
     }
@@ -78,32 +75,29 @@ impl YamNode {
 
 pub fn parse_file(path: impl AsRef<Path>) -> Result<YamNode> {
     let path = path.as_ref();
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open file: {}", path.display()))?;
+    let input =
+        fs::read(path).with_context(|| format!("failed to open file: {}", path.display()))?;
     if is_json_file(path) {
-        parse_json(&mut file)
+        parse_json(&input)
     } else {
-        parse_yaml(&mut file)
+        parse_yaml(&input)
     }
 }
 
-pub fn parse_yaml(reader: &mut dyn Read) -> Result<YamNode> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_reader(reader).context("failed to parse YAML")?;
-    let root = yaml_value_to_node(value, None, 0, Vec::new(), 0);
+pub fn parse_yaml(input: &[u8]) -> Result<YamNode> {
+    let value: serde_yaml::Value = serde_yaml::from_slice(input).context("failed to parse YAML")?;
+    let root = yaml_value_to_node(value, None, 0, 0);
     Ok(YamNode::document(root))
 }
 
-pub fn parse_json(reader: &mut dyn Read) -> Result<YamNode> {
-    let value: serde_json::Value =
-        serde_json::from_reader(reader).context("failed to parse JSON")?;
-    let root = json_value_to_node(value, None, 0, Vec::new(), 0);
+pub fn parse_json(input: &[u8]) -> Result<YamNode> {
+    let value: serde_json::Value = serde_json::from_slice(input).context("failed to parse JSON")?;
+    let root = json_value_to_node(value, None, 0, 0);
     Ok(YamNode::document(root))
 }
 
 pub fn parse_yaml_str(input: &str) -> Result<YamNode> {
-    let mut bytes = input.as_bytes();
-    parse_yaml(&mut bytes)
+    parse_yaml(input.as_bytes())
 }
 
 pub fn parse_path(path: &str) -> Result<Vec<String>> {
@@ -281,21 +275,16 @@ fn yaml_value_to_node(
     value: serde_yaml::Value,
     key: Option<String>,
     depth: usize,
-    path: Vec<String>,
     index: usize,
 ) -> YamNode {
     match value {
         serde_yaml::Value::Mapping(mapping) => {
             let mut children = Vec::with_capacity(mapping.len());
             for (idx, (key_value, value)) in mapping.into_iter().enumerate() {
-                let key_string = yaml_key_to_string(&key_value);
-                let mut child_path = path.clone();
-                child_path.push(key_string.clone());
                 children.push(yaml_value_to_node(
                     value,
-                    Some(key_string),
+                    Some(yaml_key_to_string(&key_value)),
                     depth + 1,
-                    child_path,
                     idx,
                 ));
             }
@@ -306,7 +295,6 @@ fn yaml_value_to_node(
                 tag: None,
                 children,
                 depth,
-                path,
                 index,
             }
         }
@@ -314,11 +302,7 @@ fn yaml_value_to_node(
             let children = sequence
                 .into_iter()
                 .enumerate()
-                .map(|(idx, value)| {
-                    let mut child_path = path.clone();
-                    child_path.push(idx.to_string());
-                    yaml_value_to_node(value, None, depth + 1, child_path, idx)
-                })
+                .map(|(idx, value)| yaml_value_to_node(value, None, depth + 1, idx))
                 .collect();
             YamNode {
                 kind: NodeKind::Sequence,
@@ -327,12 +311,11 @@ fn yaml_value_to_node(
                 tag: None,
                 children,
                 depth,
-                path,
                 index,
             }
         }
         serde_yaml::Value::Bool(value) => {
-            scalar_node(key, value.to_string(), "!!bool", depth, path, index)
+            scalar_node(key, value.to_string(), "!!bool", depth, index)
         }
         serde_yaml::Value::Number(value) => {
             let tag = if value.as_i64().is_some() || value.as_u64().is_some() {
@@ -340,15 +323,11 @@ fn yaml_value_to_node(
             } else {
                 "!!float"
             };
-            scalar_node(key, value.to_string(), tag, depth, path, index)
+            scalar_node(key, value.to_string(), tag, depth, index)
         }
-        serde_yaml::Value::String(value) => scalar_node(key, value, "!!str", depth, path, index),
-        serde_yaml::Value::Null => {
-            scalar_node(key, "null".to_string(), "!!null", depth, path, index)
-        }
-        serde_yaml::Value::Tagged(tagged) => {
-            yaml_value_to_node(tagged.value, key, depth, path, index)
-        }
+        serde_yaml::Value::String(value) => scalar_node(key, value, "!!str", depth, index),
+        serde_yaml::Value::Null => scalar_node(key, "null".to_string(), "!!null", depth, index),
+        serde_yaml::Value::Tagged(tagged) => yaml_value_to_node(tagged.value, key, depth, index),
     }
 }
 
@@ -356,22 +335,13 @@ fn json_value_to_node(
     value: serde_json::Value,
     key: Option<String>,
     depth: usize,
-    path: Vec<String>,
     index: usize,
 ) -> YamNode {
     match value {
         serde_json::Value::Object(map) => {
             let mut children = Vec::with_capacity(map.len());
             for (idx, (key_string, value)) in map.into_iter().enumerate() {
-                let mut child_path = path.clone();
-                child_path.push(key_string.clone());
-                children.push(json_value_to_node(
-                    value,
-                    Some(key_string),
-                    depth + 1,
-                    child_path,
-                    idx,
-                ));
+                children.push(json_value_to_node(value, Some(key_string), depth + 1, idx));
             }
             YamNode {
                 kind: NodeKind::Mapping,
@@ -380,7 +350,6 @@ fn json_value_to_node(
                 tag: None,
                 children,
                 depth,
-                path,
                 index,
             }
         }
@@ -388,11 +357,7 @@ fn json_value_to_node(
             let children = values
                 .into_iter()
                 .enumerate()
-                .map(|(idx, value)| {
-                    let mut child_path = path.clone();
-                    child_path.push(idx.to_string());
-                    json_value_to_node(value, None, depth + 1, child_path, idx)
-                })
+                .map(|(idx, value)| json_value_to_node(value, None, depth + 1, idx))
                 .collect();
             YamNode {
                 kind: NodeKind::Sequence,
@@ -401,13 +366,12 @@ fn json_value_to_node(
                 tag: None,
                 children,
                 depth,
-                path,
                 index,
             }
         }
-        serde_json::Value::String(value) => scalar_node(key, value, "!!str", depth, path, index),
+        serde_json::Value::String(value) => scalar_node(key, value, "!!str", depth, index),
         serde_json::Value::Bool(value) => {
-            scalar_node(key, value.to_string(), "!!bool", depth, path, index)
+            scalar_node(key, value.to_string(), "!!bool", depth, index)
         }
         serde_json::Value::Number(value) => {
             let tag = if value.is_i64() || value.is_u64() {
@@ -415,11 +379,9 @@ fn json_value_to_node(
             } else {
                 "!!float"
             };
-            scalar_node(key, value.to_string(), tag, depth, path, index)
+            scalar_node(key, value.to_string(), tag, depth, index)
         }
-        serde_json::Value::Null => {
-            scalar_node(key, "null".to_string(), "!!null", depth, path, index)
-        }
+        serde_json::Value::Null => scalar_node(key, "null".to_string(), "!!null", depth, index),
     }
 }
 
@@ -428,7 +390,6 @@ fn scalar_node(
     value: String,
     tag: &'static str,
     depth: usize,
-    path: Vec<String>,
     index: usize,
 ) -> YamNode {
     YamNode {
@@ -438,7 +399,6 @@ fn scalar_node(
         tag: Some(tag.to_string()),
         children: Vec::new(),
         depth,
-        path,
         index,
     }
 }
@@ -555,19 +515,91 @@ pub fn node_to_ordered_yaml(node: &YamNode, sort_keys: bool) -> serde_yaml::Valu
                 node.value.as_deref(),
                 Some("true" | "yes" | "on")
             )),
-            ScalarType::Number => {
-                let raw = node.value.as_deref().unwrap_or_default();
-                serde_yaml::from_str(raw)
-                    .unwrap_or_else(|_| serde_yaml::Value::String(raw.to_string()))
-            }
+            ScalarType::Number => yaml_number(node.value.as_deref().unwrap_or_default()),
             ScalarType::String => serde_yaml::Value::String(node.value.clone().unwrap_or_default()),
         },
     }
 }
 
+/// Converts a number scalar without starting a YAML parser for the plain
+/// decimal forms that parsing produces; anything else keeps serde_yaml's own
+/// resolution rules (leading zeros, `.inf`, exponents, edited values).
+fn yaml_number(raw: &str) -> serde_yaml::Value {
+    if is_plain_decimal(raw) {
+        let number = if raw.contains('.') {
+            raw.parse::<f64>().ok().map(serde_yaml::Number::from)
+        } else {
+            raw.parse::<i64>()
+                .map(serde_yaml::Number::from)
+                .or_else(|_| raw.parse::<u64>().map(serde_yaml::Number::from))
+                .ok()
+        };
+        if let Some(number) = number {
+            return serde_yaml::Value::Number(number);
+        }
+    }
+    serde_yaml::from_str(raw).unwrap_or_else(|_| serde_yaml::Value::String(raw.to_string()))
+}
+
+/// `-?(0|[1-9][0-9]*)(\.[0-9]+)?`
+fn is_plain_decimal(input: &str) -> bool {
+    let digits = input.strip_prefix('-').unwrap_or(input);
+    let (int, frac) = match digits.split_once('.') {
+        Some((int, frac)) => (int, Some(frac)),
+        None => (digits, None),
+    };
+    let int_ok = int == "0"
+        || (!int.is_empty() && !int.starts_with('0') && int.bytes().all(|b| b.is_ascii_digit()));
+    int_ok
+        && frac
+            .iter()
+            .all(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_number_matches_serde_yaml_resolution() {
+        for raw in [
+            "0",
+            "1",
+            "-1",
+            "-0",
+            "42",
+            "007",
+            "+7",
+            "1_000",
+            "1.5",
+            "-0.0",
+            "0.5",
+            ".5",
+            "1.",
+            "1.0",
+            "1000.0",
+            "1e3",
+            "1E-2",
+            "+.5",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            ".inf",
+            "-.inf",
+            ".nan",
+            "abc",
+            "1.2.3",
+        ] {
+            let expected = serde_yaml::from_str(raw)
+                .unwrap_or_else(|_| serde_yaml::Value::String(raw.to_string()));
+            assert_eq!(
+                serde_yaml::to_string(&yaml_number(raw)).unwrap(),
+                serde_yaml::to_string(&expected).unwrap(),
+                "{raw}"
+            );
+        }
+    }
 
     #[test]
     fn parses_path_segments() {
