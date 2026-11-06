@@ -1,10 +1,12 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Number;
 use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
+    /// Several documents ("---" separated); children are Document nodes.
+    Stream,
     Document,
     Mapping,
     Sequence,
@@ -43,6 +45,37 @@ impl YamNode {
         }
     }
 
+    /// A stream of several documents.
+    pub fn stream(docs: Vec<YamNode>) -> Self {
+        let children = docs
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut doc)| {
+                doc.index = index;
+                doc
+            })
+            .collect();
+        Self {
+            kind: NodeKind::Stream,
+            key: None,
+            value: None,
+            tag: None,
+            children,
+            depth: 0,
+            index: 0,
+        }
+    }
+
+    /// Builds a tree from documents: one document is returned as is, several
+    /// become a stream.
+    pub fn from_documents(mut docs: Vec<YamNode>) -> Self {
+        if docs.len() == 1 {
+            docs.pop().expect("one document")
+        } else {
+            Self::stream(docs)
+        }
+    }
+
     pub fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
@@ -68,9 +101,83 @@ impl YamNode {
     pub fn is_container(&self) -> bool {
         matches!(
             self.kind,
-            NodeKind::Document | NodeKind::Mapping | NodeKind::Sequence
+            NodeKind::Stream | NodeKind::Document | NodeKind::Mapping | NodeKind::Sequence
         )
     }
+
+    /// Short type label of a scalar: str, int, float, bool or null.
+    pub fn type_label(&self) -> &'static str {
+        match self.infer_type() {
+            ScalarType::String => "str",
+            ScalarType::Boolean => "bool",
+            ScalarType::Null => "null",
+            ScalarType::Number => match self.tag.as_deref() {
+                Some("!!float") => "float",
+                Some("!!int") => "int",
+                _ => {
+                    let v = self.value.as_deref().unwrap_or_default();
+                    if v.contains(['.', 'e', 'E']) || v.ends_with("inf") || v.ends_with("nan") {
+                        "float"
+                    } else {
+                        "int"
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// The documents of a tree: every document of a stream, or the node itself.
+pub fn documents(root: &YamNode) -> Vec<&YamNode> {
+    if root.kind == NodeKind::Stream {
+        root.children.iter().collect()
+    } else {
+        vec![root]
+    }
+}
+
+/// Mutable access to the documents of a tree.
+pub fn documents_mut(root: &mut YamNode) -> Vec<&mut YamNode> {
+    if root.kind == NodeKind::Stream {
+        root.children.iter_mut().collect()
+    } else {
+        vec![root]
+    }
+}
+
+/// The top-level content of a document (the document node itself otherwise).
+pub fn content(node: &YamNode) -> &YamNode {
+    if node.kind == NodeKind::Document {
+        node.children.first().unwrap_or(node)
+    } else {
+        node
+    }
+}
+
+/// "Kind/namespace/name" (or "Kind/name") for Kubernetes-style documents.
+pub fn resource_id(doc: &YamNode) -> Option<String> {
+    let root = content(doc);
+    if root.kind != NodeKind::Mapping {
+        return None;
+    }
+    let child = |node: &YamNode, key: &str| {
+        node.children
+            .iter()
+            .find(|c| c.key.as_deref() == Some(key))
+            .cloned()
+    };
+    let scalar = |node: Option<YamNode>| {
+        node.filter(|n| n.kind == NodeKind::Scalar)
+            .and_then(|n| n.value)
+            .filter(|v| !v.is_empty())
+    };
+    let kind = scalar(child(root, "kind"))?;
+    let metadata = child(root, "metadata")?;
+    let name = scalar(child(&metadata, "name"))?;
+    Some(match scalar(child(&metadata, "namespace")) {
+        Some(ns) => format!("{kind}/{ns}/{name}"),
+        None => format!("{kind}/{name}"),
+    })
 }
 
 pub fn parse_file(path: impl AsRef<Path>) -> Result<YamNode> {
@@ -84,154 +191,59 @@ pub fn parse_file(path: impl AsRef<Path>) -> Result<YamNode> {
     }
 }
 
+/// Parses YAML. Several documents ("---") produce a stream node; merge keys
+/// ("<<") are applied and aliases resolved.
 pub fn parse_yaml(input: &[u8]) -> Result<YamNode> {
-    let value: serde_yaml::Value = serde_yaml::from_slice(input).context("failed to parse YAML")?;
-    let root = yaml_value_to_node(value, None, 0, 0);
-    Ok(YamNode::document(root))
+    use serde::Deserialize;
+    let mut docs = Vec::new();
+    for (idx, de) in serde_yaml::Deserializer::from_slice(input).enumerate() {
+        let mut value = serde_yaml::Value::deserialize(de).with_context(|| {
+            if idx == 0 {
+                "failed to parse YAML".to_string()
+            } else {
+                format!("failed to parse YAML (document {})", idx + 1)
+            }
+        })?;
+        value
+            .apply_merge()
+            .context("failed to apply YAML merge keys (<<)")?;
+        docs.push(YamNode::document(yaml_value_to_node(value, None, 0, 0)));
+    }
+    if docs.is_empty() {
+        // An empty input is a single null document.
+        docs.push(YamNode::document(yaml_value_to_node(
+            serde_yaml::Value::Null,
+            None,
+            0,
+            0,
+        )));
+    }
+    Ok(YamNode::from_documents(docs))
 }
 
+/// Parses JSON with key order preserved. Several concatenated values
+/// (JSON Lines) produce a stream node.
 pub fn parse_json(input: &[u8]) -> Result<YamNode> {
-    let value: serde_json::Value = serde_json::from_slice(input).context("failed to parse JSON")?;
-    let root = json_value_to_node(value, None, 0, 0);
-    Ok(YamNode::document(root))
+    let mut docs = Vec::new();
+    for value in serde_json::Deserializer::from_slice(input).into_iter::<serde_json::Value>() {
+        let value = value.context("failed to parse JSON")?;
+        docs.push(YamNode::document(json_value_to_node(value, None, 0, 0)));
+    }
+    if docs.is_empty() {
+        bail!("failed to parse JSON: empty input");
+    }
+    Ok(YamNode::from_documents(docs))
 }
 
 pub fn parse_yaml_str(input: &str) -> Result<YamNode> {
     parse_yaml(input.as_bytes())
 }
 
-pub fn parse_path(path: &str) -> Result<Vec<String>> {
-    if path.is_empty() || path == "." {
-        return Ok(Vec::new());
-    }
-    if !path.starts_with('.') {
-        bail!("path must start with '.': {path}");
-    }
-
-    let bytes = path.as_bytes();
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut i = 1;
-    while i < bytes.len() {
-        match bytes[i] as char {
-            '.' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-                i += 1;
-            }
-            '[' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-                let Some(end_rel) = path[i..].find(']') else {
-                    bail!("unclosed bracket in path: {path}");
-                };
-                let index = &path[i + 1..i + end_rel];
-                index
-                    .parse::<usize>()
-                    .with_context(|| format!("invalid array index: {index}"))?;
-                segments.push(index.to_string());
-                i += end_rel + 1;
-            }
-            ch => {
-                current.push(ch);
-                i += 1;
-            }
-        }
-    }
-    if !current.is_empty() {
-        segments.push(current);
-    }
-    Ok(segments)
-}
-
-pub fn get_by_path<'a>(root: &'a YamNode, path: &str) -> Result<&'a YamNode> {
-    let segments = parse_path(path)?;
-    if segments.is_empty() {
-        return Ok(root);
-    }
-
-    let mut current = if root.kind == NodeKind::Document && !root.children.is_empty() {
-        &root.children[0]
-    } else {
-        root
-    };
-
-    for segment in segments {
-        match current.kind {
-            NodeKind::Mapping => {
-                current = current
-                    .children
-                    .iter()
-                    .find(|child| child.key.as_deref() == Some(segment.as_str()))
-                    .ok_or_else(|| anyhow!("path not found: {segment}"))?;
-            }
-            NodeKind::Sequence => {
-                let index: usize = segment
-                    .parse()
-                    .with_context(|| format!("expected array index, got: {segment}"))?;
-                current = current.children.get(index).ok_or_else(|| {
-                    anyhow!(
-                        "array index out of bounds: {index} (length: {})",
-                        current.children.len()
-                    )
-                })?;
-            }
-            _ => bail!("cannot traverse into scalar value at: {segment}"),
-        }
-    }
-
-    Ok(current)
-}
-
-pub fn get_by_segments<'a>(root: &'a YamNode, segments: &[String]) -> Option<&'a YamNode> {
-    let mut current = if root.kind == NodeKind::Document && !root.children.is_empty() {
-        &root.children[0]
-    } else {
-        root
-    };
-
-    for segment in segments {
-        current = match current.kind {
-            NodeKind::Mapping => current
-                .children
-                .iter()
-                .find(|child| child.key.as_deref() == Some(segment.as_str()))?,
-            NodeKind::Sequence => current.children.get(segment.parse::<usize>().ok()?)?,
-            _ => return None,
-        };
-    }
-
-    Some(current)
-}
-
-pub fn get_by_segments_mut<'a>(
-    root: &'a mut YamNode,
-    segments: &[String],
-) -> Option<&'a mut YamNode> {
-    let mut current = if root.kind == NodeKind::Document && !root.children.is_empty() {
-        &mut root.children[0]
-    } else {
-        root
-    };
-
-    for segment in segments {
-        current = match current.kind {
-            NodeKind::Mapping => current
-                .children
-                .iter_mut()
-                .find(|child| child.key.as_deref() == Some(segment.as_str()))?,
-            NodeKind::Sequence => current.children.get_mut(segment.parse::<usize>().ok()?)?,
-            _ => return None,
-        };
-    }
-
-    Some(current)
-}
-
 pub fn to_json_value(node: &YamNode) -> serde_json::Value {
     match node.kind {
+        NodeKind::Stream => {
+            serde_json::Value::Array(node.children.iter().map(to_json_value).collect())
+        }
         NodeKind::Document => node
             .children
             .first()
@@ -267,7 +279,11 @@ pub fn is_json_file(path: impl AsRef<Path>) -> bool {
     path.as_ref()
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .map(|ext| {
+            ["json", "jsonl", "ndjson"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
         .unwrap_or(false)
 }
 
@@ -482,6 +498,12 @@ fn is_number(input: &str) -> bool {
 
 pub fn node_to_ordered_yaml(node: &YamNode, sort_keys: bool) -> serde_yaml::Value {
     match node.kind {
+        NodeKind::Stream => serde_yaml::Value::Sequence(
+            node.children
+                .iter()
+                .map(|child| node_to_ordered_yaml(child, sort_keys))
+                .collect(),
+        ),
         NodeKind::Document => node
             .children
             .first()
@@ -559,6 +581,7 @@ fn is_plain_decimal(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::get_by_path;
 
     #[test]
     fn yaml_number_matches_serde_yaml_resolution() {
@@ -599,24 +622,6 @@ mod tests {
                 "{raw}"
             );
         }
-    }
-
-    #[test]
-    fn parses_path_segments() {
-        assert_eq!(parse_path(".foo.bar").unwrap(), vec!["foo", "bar"]);
-        assert_eq!(
-            parse_path(".items[0].name").unwrap(),
-            vec!["items", "0", "name"]
-        );
-        assert!(parse_path("foo").is_err());
-        assert!(parse_path(".items[x]").is_err());
-    }
-
-    #[test]
-    fn gets_node_by_path() {
-        let root = parse_yaml_str("items:\n  - name: first\n").unwrap();
-        let node = get_by_path(&root, ".items[0].name").unwrap();
-        assert_eq!(node.value.as_deref(), Some("first"));
     }
 
     #[test]

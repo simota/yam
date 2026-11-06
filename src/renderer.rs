@@ -1,4 +1,4 @@
-use crate::parser::{NodeKind, ScalarType, YamNode};
+use crate::parser::{resource_id, NodeKind, ScalarType, YamNode};
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +33,13 @@ fn render_node(
     chars: TreeChars,
     show_types: bool,
 ) -> io::Result<()> {
+    if node.kind == NodeKind::Stream {
+        for doc in &node.children {
+            writeln!(output, "--- {}", document_label(doc))?;
+            render_node(output, doc, prefix, true, chars, show_types)?;
+        }
+        return Ok(());
+    }
     if node.kind == NodeKind::Document {
         for (idx, child) in node.children.iter().enumerate() {
             render_node(
@@ -47,7 +54,11 @@ fn render_node(
         return Ok(());
     }
 
-    render_single_node(output, node, prefix, is_last, chars, show_types)?;
+    // The top-level container has no key and would be an empty line.
+    let is_root_container = node.depth == 0 && node.key.is_none() && node.has_children();
+    if !is_root_container {
+        render_single_node(output, node, prefix, is_last, chars, show_types)?;
+    }
 
     if node.has_children() {
         let new_prefix = child_prefix(prefix, is_last, node.depth, chars);
@@ -85,7 +96,17 @@ fn render_single_node(
     }
 
     match node.kind {
-        NodeKind::Mapping | NodeKind::Sequence | NodeKind::Document => {}
+        NodeKind::Mapping | NodeKind::Sequence => {
+            if node.children.is_empty() {
+                let empty = if node.kind == NodeKind::Mapping {
+                    "{}"
+                } else {
+                    "[]"
+                };
+                output.write_all(empty.as_bytes())?;
+            }
+        }
+        NodeKind::Document | NodeKind::Stream => {}
         NodeKind::Scalar => output.write_all(render_value(node, show_types).as_bytes())?,
     }
     output.write_all(b"\n")
@@ -101,9 +122,17 @@ fn render_value(node: &YamNode, show_types: bool) -> String {
     };
 
     if show_types {
-        format!("{rendered} {}", type_label(scalar_type))
+        format!("{rendered} <{}>", node.type_label())
     } else {
         rendered
+    }
+}
+
+/// "document N" plus "(Kind/name)" for Kubernetes-style documents.
+pub fn document_label(doc: &YamNode) -> String {
+    match resource_id(doc) {
+        Some(id) => format!("document {} ({id})", doc.index + 1),
+        None => format!("document {}", doc.index + 1),
     }
 }
 
@@ -114,15 +143,6 @@ fn child_prefix(prefix: &str, is_last: bool, depth: usize, chars: TreeChars) -> 
         format!("{prefix}    ")
     } else {
         format!("{prefix}{}   ", chars.vertical)
-    }
-}
-
-fn type_label(scalar_type: ScalarType) -> &'static str {
-    match scalar_type {
-        ScalarType::String => "<str>",
-        ScalarType::Number => "<int>",
-        ScalarType::Boolean => "<bool>",
-        ScalarType::Null => "<null>",
     }
 }
 
