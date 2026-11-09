@@ -1272,19 +1272,40 @@ fn base64(input: &[u8]) -> String {
     out
 }
 
-#[derive(Debug, Clone)]
-struct DiffRow {
-    left: String,
-    right: String,
+#[derive(Debug, Clone, Copy)]
+struct DiffRow<'a> {
+    left: Option<&'a YamNode>,
+    right: Option<&'a YamNode>,
+    /// Set on the row of a document of a multi-document diff.
+    label: Option<&'a str>,
     diff_type: DiffType,
     changed: bool,
     /// The row or one of its descendants differs.
     subtree_changed: bool,
 }
 
-struct DiffApp {
-    all_rows: Vec<DiffRow>,
-    rows: Vec<DiffRow>,
+/// A row's text is formatted only when the row is drawn, so opening a large
+/// diff does not format every row up front.
+impl DiffRow<'_> {
+    fn left_text(&self) -> String {
+        self.side_text(self.left)
+    }
+
+    fn right_text(&self) -> String {
+        self.side_text(self.right)
+    }
+
+    fn side_text(&self, side: Option<&YamNode>) -> String {
+        match self.label {
+            Some(label) => side.map(|_| format!("=== {label}")).unwrap_or_default(),
+            None => side.map(format_diff_node).unwrap_or_default(),
+        }
+    }
+}
+
+struct DiffApp<'a> {
+    all_rows: Vec<DiffRow<'a>>,
+    rows: Vec<DiffRow<'a>>,
     changes_only: bool,
     left_file: String,
     right_file: String,
@@ -1295,8 +1316,8 @@ struct DiffApp {
     status: String,
 }
 
-impl DiffApp {
-    fn new(result: &DiffResult<'_>) -> Self {
+impl<'a> DiffApp<'a> {
+    fn new(result: &'a DiffResult<'a>) -> Self {
         let mut rows = Vec::new();
         if let Some(root) = &result.root {
             collect_diff_rows(root, &mut rows);
@@ -1440,8 +1461,11 @@ impl DiffApp {
                 DiffType::Modified => "~ ",
                 _ => "  ",
             };
-            let left = truncate(&format!("{left_prefix}{}", row.left), pane as usize);
-            let right = truncate(&format!("{right_prefix}{}", row.right), pane as usize);
+            let left = truncate(&format!("{left_prefix}{}", row.left_text()), pane as usize);
+            let right = truncate(
+                &format!("{right_prefix}{}", row.right_text()),
+                pane as usize,
+            );
             queue!(
                 stdout,
                 Print(pad(&left, pane as usize)),
@@ -1538,43 +1562,48 @@ impl DiffApp {
     }
 }
 
-fn diff_subtree_changed(node: &DiffNode<'_>) -> bool {
-    node.diff_type != DiffType::Unchanged || node.children.iter().any(diff_subtree_changed)
-}
-
-fn collect_diff_rows(node: &DiffNode<'_>, rows: &mut Vec<DiffRow>) {
+/// Adds the rows of `node` and its descendants in preorder; returns whether
+/// `node` or one of its descendants differs.
+fn collect_diff_rows<'a>(node: &'a DiffNode<'a>, rows: &mut Vec<DiffRow<'a>>) -> bool {
     let is_document = node.left.is_some_and(|n| n.kind == NodeKind::Document)
         || node.right.is_some_and(|n| n.kind == NodeKind::Document);
     let is_root_container = node.label.is_none()
         && node.path.is_empty()
         && node.left.is_none_or(|n| n.depth == 0 && n.key.is_none())
         && node.right.is_none_or(|n| n.depth == 0 && n.key.is_none());
-    if let Some(label) = &node.label {
-        rows.push(DiffRow {
-            left: node
-                .left
-                .map(|_| format!("=== {label}"))
-                .unwrap_or_default(),
-            right: node
-                .right
-                .map(|_| format!("=== {label}"))
-                .unwrap_or_default(),
+    let row = if let Some(label) = &node.label {
+        Some(DiffRow {
+            left: node.left,
+            right: node.right,
+            label: Some(label),
             diff_type: node.diff_type,
             changed: matches!(node.diff_type, DiffType::Added | DiffType::Removed),
-            subtree_changed: diff_subtree_changed(node),
-        });
+            subtree_changed: false,
+        })
     } else if !is_document && !(is_root_container && !node.children.is_empty()) {
-        rows.push(DiffRow {
-            left: node.left.map(format_diff_node).unwrap_or_default(),
-            right: node.right.map(format_diff_node).unwrap_or_default(),
+        Some(DiffRow {
+            left: node.left,
+            right: node.right,
+            label: None,
             diff_type: node.diff_type,
             changed: node.diff_type != DiffType::Unchanged,
-            subtree_changed: diff_subtree_changed(node),
-        });
-    }
+            subtree_changed: false,
+        })
+    } else {
+        None
+    };
+    let row_index = row.map(|row| {
+        rows.push(row);
+        rows.len() - 1
+    });
+    let mut subtree_changed = node.diff_type != DiffType::Unchanged;
     for child in &node.children {
-        collect_diff_rows(child, rows);
+        subtree_changed |= collect_diff_rows(child, rows);
     }
+    if let Some(index) = row_index {
+        rows[index].subtree_changed = subtree_changed;
+    }
+    subtree_changed
 }
 
 fn format_diff_node(node: &YamNode) -> String {
@@ -2055,6 +2084,118 @@ mod tests {
 
         assert_eq!(self::app("42\n").render_node_line(0), "  42");
         assert_eq!(self::app("a: 1\n").render_node_line(1), "  a: 1");
+    }
+
+    /// Diff rows as they were built before their text was formatted lazily.
+    mod eager {
+        use super::super::format_diff_node;
+        use crate::diff::{DiffNode, DiffType};
+        use crate::parser::NodeKind;
+
+        #[derive(Debug, Clone)]
+        pub struct DiffRow {
+            pub left: String,
+            pub right: String,
+            pub diff_type: DiffType,
+            pub changed: bool,
+            /// The row or one of its descendants differs.
+            pub subtree_changed: bool,
+        }
+
+        fn diff_subtree_changed(node: &DiffNode<'_>) -> bool {
+            node.diff_type != DiffType::Unchanged || node.children.iter().any(diff_subtree_changed)
+        }
+
+        pub fn collect_diff_rows(node: &DiffNode<'_>, rows: &mut Vec<DiffRow>) {
+            let is_document = node.left.is_some_and(|n| n.kind == NodeKind::Document)
+                || node.right.is_some_and(|n| n.kind == NodeKind::Document);
+            let is_root_container = node.label.is_none()
+                && node.path.is_empty()
+                && node.left.is_none_or(|n| n.depth == 0 && n.key.is_none())
+                && node.right.is_none_or(|n| n.depth == 0 && n.key.is_none());
+            if let Some(label) = &node.label {
+                rows.push(DiffRow {
+                    left: node
+                        .left
+                        .map(|_| format!("=== {label}"))
+                        .unwrap_or_default(),
+                    right: node
+                        .right
+                        .map(|_| format!("=== {label}"))
+                        .unwrap_or_default(),
+                    diff_type: node.diff_type,
+                    changed: matches!(node.diff_type, DiffType::Added | DiffType::Removed),
+                    subtree_changed: diff_subtree_changed(node),
+                });
+            } else if !is_document && !(is_root_container && !node.children.is_empty()) {
+                rows.push(DiffRow {
+                    left: node.left.map(format_diff_node).unwrap_or_default(),
+                    right: node.right.map(format_diff_node).unwrap_or_default(),
+                    diff_type: node.diff_type,
+                    changed: node.diff_type != DiffType::Unchanged,
+                    subtree_changed: diff_subtree_changed(node),
+                });
+            }
+            for child in &node.children {
+                collect_diff_rows(child, rows);
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_diff_rows_match_eager_rows() {
+        let pairs = [
+            (
+                "a: 1\nb:\n  c: 1\n  d: 1\ne: 1\n",
+                "a: 1\nb:\n  c: 1\n  d: 2\ne: 1\n",
+            ),
+            ("l: [a, b, c]\n", "l: [x, a, b, c]\n"),
+            ("5", "[1, {a: 2}]"),
+            ("{}", "{}"),
+            (
+                "kind: A\nmetadata: {name: x}\nv: 1\n---\nkind: B\nmetadata: {name: y}\n",
+                "kind: B\nmetadata: {name: y}\nv: 2\n---\nkind: C\nmetadata: {name: z}\n",
+            ),
+            ("a: 1\n---\nb: [1]\n", "a: 1\n---\nb: [2]\n---\nc: x\n"),
+        ];
+        for (left, right) in pairs {
+            let (l, r) = (
+                parse_yaml_str(left).unwrap(),
+                parse_yaml_str(right).unwrap(),
+            );
+            let result = crate::diff::compare(&l, &r);
+            let mut want = Vec::new();
+            if let Some(root) = &result.root {
+                eager::collect_diff_rows(root, &mut want);
+            }
+            let app = DiffApp::new(&result);
+            let got: Vec<_> = app
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.left_text(),
+                        row.right_text(),
+                        row.diff_type,
+                        row.changed,
+                        row.subtree_changed,
+                    )
+                })
+                .collect();
+            let want: Vec<_> = want
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.left,
+                        row.right,
+                        row.diff_type,
+                        row.changed,
+                        row.subtree_changed,
+                    )
+                })
+                .collect();
+            assert_eq!(got, want, "{left:?} vs {right:?}");
+        }
     }
 
     #[test]

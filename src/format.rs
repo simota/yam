@@ -1,4 +1,4 @@
-use crate::parser::{documents, node_to_ordered_yaml, to_json_value, NodeKind, YamNode};
+use crate::parser::{documents, JsonView, NodeKind, YamNode, YamlView};
 use anyhow::{Context, Result};
 
 #[derive(Debug, Clone, Copy)]
@@ -36,10 +36,10 @@ pub fn format_yaml(node: &YamNode, opts: FormatOptions) -> Result<String> {
 pub fn format_json(node: &YamNode, opts: FormatOptions) -> Result<String> {
     let mut out = String::new();
     for doc in documents(node) {
-        let mut value = to_json_value(doc);
-        if opts.sort_keys {
-            sort_json(&mut value);
-        }
+        let value = JsonView {
+            node: doc,
+            sort_keys: opts.sort_keys,
+        };
         let indent = " ".repeat(opts.indent.max(1));
         let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
         let mut buf = Vec::new();
@@ -51,40 +51,36 @@ pub fn format_json(node: &YamNode, opts: FormatOptions) -> Result<String> {
     Ok(out)
 }
 
-fn sort_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            map.sort_keys();
-            map.values_mut().for_each(sort_json);
-        }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_json),
-        _ => {}
-    }
-}
-
 fn format_document(node: &YamNode, opts: FormatOptions) -> Result<String> {
-    let value = node_to_ordered_yaml(node, opts.sort_keys);
-    let mut output = serde_yaml::to_string(&value).context("failed to format YAML")?;
-    output = normalize_indentation(&output, opts.indent);
+    let view = YamlView {
+        node,
+        sort_keys: opts.sort_keys,
+    };
+    let output = serde_yaml::to_string(&view).context("failed to format YAML")?;
+    let mut output = normalize_indentation(output, opts.indent);
     if !output.ends_with('\n') {
         output.push('\n');
     }
     Ok(output)
 }
 
-fn normalize_indentation(input: &str, indent: usize) -> String {
+fn normalize_indentation(input: String, indent: usize) -> String {
     if indent == 2 {
-        return input.to_string();
+        return input;
     }
-    input
-        .lines()
-        .map(|line| {
-            let leading = line.chars().take_while(|ch| *ch == ' ').count();
-            let level = leading / 2;
-            format!("{}{}", " ".repeat(level * indent), line.trim_start())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::with_capacity(input.len());
+    for (idx, line) in input.lines().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        let leading = line.bytes().take_while(|byte| *byte == b' ').count();
+        let level = leading / 2;
+        for _ in 0..level * indent {
+            output.push(' ');
+        }
+        output.push_str(line.trim_start());
+    }
+    output
 }
 
 #[cfg(test)]

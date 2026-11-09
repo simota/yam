@@ -1,7 +1,7 @@
 use crate::diff::{self, DiffOptions};
 use crate::format::{format_json, format_yaml, FormatOptions};
 use crate::parser::{
-    content, documents, is_json_file, parse_json, parse_yaml, to_json_value, to_raw_value,
+    content, documents, is_json_file, parse_json, parse_yaml, to_raw_value, write_json_pretty,
     NodeKind, YamNode,
 };
 use crate::path::{
@@ -351,8 +351,10 @@ fn run_root(cli: Cli) -> Result<i32> {
             (doc, hits[0].path.clone())
         });
         let json = filename.as_deref().map(is_json_file).unwrap_or(false);
+        // `hits` and `selected` borrow `root`; they are not used past `focus`,
+        // so the tree moves into the TUI instead of being copied.
         tui::run_tree(tui::TreeOptions {
-            root: root.clone(),
+            root,
             filename,
             display_name,
             json,
@@ -374,7 +376,7 @@ fn run_root(cli: Cli) -> Result<i32> {
         } else if cli.json {
             for hit in &hits {
                 for doc in documents(hit.node) {
-                    serde_json::to_writer_pretty(&mut *out, &to_json_value(doc))?;
+                    write_json_pretty(&mut *out, doc)?;
                     writeln!(out)?;
                 }
             }

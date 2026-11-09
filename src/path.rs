@@ -366,7 +366,7 @@ pub fn leaf_paths(root: &YamNode) -> Vec<String> {
             let is_leaf = node.kind == NodeKind::Scalar || node.children.is_empty();
             if is_leaf {
                 let value =
-                    serde_json::to_string(&crate::parser::to_json_value(node)).unwrap_or_default();
+                    serde_json::to_string(&crate::parser::JsonView::new(node)).unwrap_or_default();
                 lines.push(format!("{prefix}{} = {value}", format_path(&parts)));
             }
         });
