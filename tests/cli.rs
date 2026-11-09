@@ -168,3 +168,147 @@ fn closed_stdout_ends_output_without_error() {
 fn temp_file(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{}-{}", std::process::id(), name))
 }
+
+const MANIFESTS: &str = "kind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 2\n  containers:\n  - name: app\n    image: nginx:1.25\n---\nkind: Service\nmetadata:\n  name: web\nspec:\n  ports:\n  - port: 80\n";
+
+fn fixture(name: &str, content: &str) -> PathBuf {
+    let path = temp_file(name);
+    fs::write(&path, content).expect("write fixture");
+    path
+}
+
+#[test]
+fn queries_every_document_of_a_stream() {
+    let path = fixture("yam-e2e-manifests.yaml", MANIFESTS);
+    let file = path.to_str().unwrap();
+    yam()
+        .args(["-r", ".kind", file])
+        .assert()
+        .success()
+        .stdout("Deployment\nService\n");
+    yam()
+        .args(["-r", "..image", file])
+        .assert()
+        .success()
+        .stdout("nginx:1.25\n");
+    yam()
+        .args(["-d", "2", "-j", file])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"Service\""))
+        .stdout(predicate::str::contains("Deployment").not());
+    yam()
+        .args([".nope", file])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("no match"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn converts_between_json_and_yaml_keeping_order() {
+    let path = fixture("yam-e2e-order.json", r#"{"z":1,"a":{"t":"true"}}"#);
+    yam()
+        .args(["--yaml", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout("z: 1\na:\n  t: 'true'\n");
+    yam()
+        .args(["--paths"])
+        .write_stdin("a:\n  b: 1\n")
+        .assert()
+        .success()
+        .stdout(".a.b = 1\n");
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn fmt_keeps_documents_and_checks() {
+    let path = fixture("yam-e2e-fmt.yaml", "a:   1\n---\nb:    2\n");
+    let file = path.to_str().unwrap();
+    yam()
+        .args(["fmt", "--check", file])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(file));
+    yam().args(["fmt", "-w", file]).assert().success();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "a: 1\n---\nb: 2\n");
+    yam().args(["fmt", "--check", file]).assert().success();
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn set_and_del_edit_files() {
+    let path = fixture("yam-e2e-edit.yaml", MANIFESTS);
+    let file = path.to_str().unwrap();
+    yam()
+        .args(["set", "-w", ".spec.replicas", "5", file])
+        .assert()
+        .success();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("replicas: 5"), "{text}");
+    assert!(text.contains("kind: Service"), "{text}");
+    assert_eq!(text.matches("replicas").count(), 1, "only the Deployment");
+
+    yam()
+        .args(["del", "-w", ".spec.containers[0]", file])
+        .assert()
+        .success();
+    assert!(!fs::read_to_string(&path).unwrap().contains("nginx"));
+    yam()
+        .args(["del", ".nope", file])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("path not found"));
+    yam()
+        .args(["set", ".b", "x"])
+        .write_stdin("a: 1\n")
+        .assert()
+        .success()
+        .stdout("a: 1\nb: x\n");
+    yam()
+        .args(["set", "-w", ".b", "x"])
+        .write_stdin("a: 1\n")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("stdin"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn diff_exit_codes_and_json() {
+    let a = fixture("yam-e2e-a.yaml", "x: 1\n");
+    let b = fixture("yam-e2e-b.yaml", "x: 2\n");
+    let (a_s, b_s) = (a.to_str().unwrap(), b.to_str().unwrap());
+    yam().args(["diff", a_s, a_s]).assert().code(0);
+    yam()
+        .args(["diff", a_s, b_s])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("1 modified"));
+    yam()
+        .args(["diff", a_s, "/nonexistent.yaml"])
+        .assert()
+        .code(2);
+    yam()
+        .args(["diff", "--json", a_s, b_s])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"path\": \".x\""));
+    yam()
+        .args(["diff", "-s", b_s, "-"])
+        .write_stdin("x: 2\n")
+        .assert()
+        .code(0);
+    let _ = fs::remove_file(a);
+    let _ = fs::remove_file(b);
+}
+
+#[test]
+fn parse_errors_explain_the_cause() {
+    yam()
+        .write_stdin("a: [1, 2\n")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("failed to parse YAML:"));
+}
