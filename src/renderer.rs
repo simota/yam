@@ -1,4 +1,4 @@
-use crate::parser::{NodeKind, ScalarType, YamNode};
+use crate::parser::{resource_id, NodeKind, ScalarType, YamNode};
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +43,13 @@ fn render_node(
     chars: TreeChars,
     show_types: bool,
 ) -> io::Result<()> {
+    if node.kind == NodeKind::Stream {
+        for doc in &node.children {
+            writeln!(output, "--- {}", document_label(doc))?;
+            render_node(output, doc, prefix, true, chars, show_types)?;
+        }
+        return Ok(());
+    }
     if node.kind == NodeKind::Document {
         for (idx, child) in node.children.iter().enumerate() {
             render_node(
@@ -57,7 +64,11 @@ fn render_node(
         return Ok(());
     }
 
-    render_single_node(output, node, prefix, is_last, chars, show_types)?;
+    // The top-level container has no key and would be an empty line.
+    let is_root_container = node.depth == 0 && node.key.is_none() && node.has_children();
+    if !is_root_container {
+        render_single_node(output, node, prefix, is_last, chars, show_types)?;
+    }
 
     if node.has_children() {
         // Children of a root start from an empty prefix.
@@ -108,7 +119,17 @@ fn render_single_node(
     }
 
     match node.kind {
-        NodeKind::Mapping | NodeKind::Sequence | NodeKind::Document => {}
+        NodeKind::Mapping | NodeKind::Sequence => {
+            if node.children.is_empty() {
+                let empty = if node.kind == NodeKind::Mapping {
+                    "{}"
+                } else {
+                    "[]"
+                };
+                output.write_all(empty.as_bytes())?;
+            }
+        }
+        NodeKind::Document | NodeKind::Stream => {}
         NodeKind::Scalar => write_value(output, node, show_types)?,
     }
     output.write_all(b"\n")
@@ -116,18 +137,26 @@ fn render_single_node(
 
 fn write_value(output: &mut impl Write, node: &YamNode, show_types: bool) -> io::Result<()> {
     let value = node.value.as_deref().unwrap_or_default();
-    let scalar_type = node.infer_type();
-    match scalar_type {
+    match node.infer_type() {
         ScalarType::Null if value.is_empty() || value == "~" => output.write_all(b"null")?,
         ScalarType::String if needs_quoting(value) => write!(output, "{value:?}")?,
         _ => output.write_all(value.as_bytes())?,
     }
 
     if show_types {
-        output.write_all(b" ")?;
-        output.write_all(type_label(scalar_type).as_bytes())?;
+        output.write_all(b" <")?;
+        output.write_all(node.type_label().as_bytes())?;
+        output.write_all(b">")?;
     }
     Ok(())
+}
+
+/// "document N" plus "(Kind/name)" for Kubernetes-style documents.
+pub fn document_label(doc: &YamNode) -> String {
+    match resource_id(doc) {
+        Some(id) => format!("document {} ({id})", doc.index + 1),
+        None => format!("document {}", doc.index + 1),
+    }
 }
 
 /// Extends a non-root node's prefix to the prefix of its children.
@@ -137,15 +166,6 @@ fn push_child_prefix(prefix: &mut String, is_last: bool, chars: TreeChars) {
     } else {
         prefix.push_str(chars.vertical);
         prefix.push_str("   ");
-    }
-}
-
-fn type_label(scalar_type: ScalarType) -> &'static str {
-    match scalar_type {
-        ScalarType::String => "<str>",
-        ScalarType::Number => "<int>",
-        ScalarType::Boolean => "<bool>",
-        ScalarType::Null => "<null>",
     }
 }
 
@@ -194,15 +214,16 @@ fn chars_for(style: TreeStyle) -> TreeChars {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{parse_json, parse_yaml_str, take_by_path};
+    use crate::parser::{parse_json, parse_yaml_str};
+    use crate::path::get_by_path;
 
     /// The renderer before it stopped allocating per node.
     mod before {
-        use super::super::{chars_for, type_label, TreeChars, TreeStyle};
+        use super::super::{chars_for, document_label, TreeChars, TreeStyle};
         use crate::parser::{NodeKind, ScalarType, YamNode};
         use std::io::{self, Write};
 
-        pub fn render_before(
+        pub fn render(
             output: &mut impl Write,
             root: &YamNode,
             style: TreeStyle,
@@ -219,6 +240,13 @@ mod tests {
             chars: TreeChars,
             show_types: bool,
         ) -> io::Result<()> {
+            if node.kind == NodeKind::Stream {
+                for doc in &node.children {
+                    writeln!(output, "--- {}", document_label(doc))?;
+                    render_node(output, doc, prefix, true, chars, show_types)?;
+                }
+                return Ok(());
+            }
             if node.kind == NodeKind::Document {
                 for (idx, child) in node.children.iter().enumerate() {
                     render_node(
@@ -233,7 +261,11 @@ mod tests {
                 return Ok(());
             }
 
-            render_single_node(output, node, prefix, is_last, chars, show_types)?;
+            // The top-level container has no key and would be an empty line.
+            let is_root_container = node.depth == 0 && node.key.is_none() && node.has_children();
+            if !is_root_container {
+                render_single_node(output, node, prefix, is_last, chars, show_types)?;
+            }
 
             if node.has_children() {
                 let new_prefix = child_prefix(prefix, is_last, node.depth, chars);
@@ -271,7 +303,17 @@ mod tests {
             }
 
             match node.kind {
-                NodeKind::Mapping | NodeKind::Sequence | NodeKind::Document => {}
+                NodeKind::Mapping | NodeKind::Sequence => {
+                    if node.children.is_empty() {
+                        let empty = if node.kind == NodeKind::Mapping {
+                            "{}"
+                        } else {
+                            "[]"
+                        };
+                        output.write_all(empty.as_bytes())?;
+                    }
+                }
+                NodeKind::Document | NodeKind::Stream => {}
                 NodeKind::Scalar => output.write_all(render_value(node, show_types).as_bytes())?,
             }
             output.write_all(b"\n")
@@ -287,7 +329,7 @@ mod tests {
             };
 
             if show_types {
-                format!("{rendered} {}", type_label(scalar_type))
+                format!("{rendered} <{}>", node.type_label())
             } else {
                 rendered
             }
@@ -325,27 +367,32 @@ mod tests {
         let mut trees: Vec<YamNode> = [
             "",
             "plain",
+            "{}",
+            "[]",
             "a: 1\nb: [1, 2.5, x, null, true, '', ' pad', '~', 'No', 'a: b', 'c # d', \"t\\tab\"]\nc: {d: e}\ne: {}\nf: []\n",
             "- a\n- [b, [c, {d: [e]}]]\n- {}\n- []\n",
-            "k: \"multi\\nline\"\nu: \"\\u00e9\\u0001\"\nq: '\"'\n",
+            "k: \"multi\\nline\"\nu: \"\\u00e9\\u0001\"\nq: '\"'\nf: 1.5\ni: 7\nn: .nan\n",
             "top:\n  mid:\n    - leaf: 1\n    - leaf: 2\n  last: {x: [1, [2, [3]]]}\nend: ~\n",
+            "kind: Pod\nmetadata: {name: a, namespace: ns}\n---\n- x\n---\n5\n---\n",
         ]
         .iter()
         .map(|input| parse_yaml_str(input).unwrap())
         .collect();
-        trees.push(parse_json(br#"{"a": [1, {"b": null}], "c": "true"}"#).unwrap());
+        trees.push(parse_json(b"{\"a\": [1, {\"b\": null}], \"c\": \"true\"}\n[2]").unwrap());
         let root = parse_yaml_str("a:\n  b:\n    - {c: 1, d: [2]}\n    - e\n").unwrap();
-        trees.push(take_by_path(root.clone(), ".a.b").unwrap());
-        trees.push(take_by_path(root.clone(), ".a.b[0]").unwrap());
+        trees.push(get_by_path(&root, ".a.b").unwrap().clone());
+        trees.push(get_by_path(&root, ".a.b[0]").unwrap().clone());
+        trees.push(get_by_path(&root, ".a.b[1]").unwrap().clone());
         // A depth-0 node below other nodes starts its children's prefix over.
         let mut nested = parse_yaml_str("x:\n  - y\n  - z: [1, 2]\nw: 3\n").unwrap();
-        let inner = parse_yaml_str("p: {q: 1}\nr: 2\n")
+        let mut inner = parse_yaml_str("p: {q: 1}\nr: 2\n")
             .unwrap()
             .children
             .remove(0);
+        inner.key = Some("inner".into());
         nested.children[0].children[0].children.insert(0, inner);
         trees.push(nested);
-        let mut untagged = parse_yaml_str("a: ''\nb: '~'\nc: NULL\nd: 'yes'\n").unwrap();
+        let mut untagged = parse_yaml_str("a: ''\nb: '~'\nc: NULL\nd: 'yes'\ne: 1.0\n").unwrap();
         for child in &mut untagged.children[0].children {
             child.tag = None;
         }
@@ -357,7 +404,7 @@ mod tests {
                     let mut output = Vec::new();
                     render(&mut output, tree, style, show_types).unwrap();
                     let mut expected = Vec::new();
-                    before::render_before(&mut expected, tree, style, show_types).unwrap();
+                    before::render(&mut expected, tree, style, show_types).unwrap();
                     assert_eq!(
                         String::from_utf8(output).unwrap(),
                         String::from_utf8(expected).unwrap(),
