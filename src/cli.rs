@@ -1,7 +1,7 @@
 use crate::diff;
 use crate::format::{format_yaml, FormatOptions};
 use crate::parser::{
-    get_by_path, parse_file, parse_json, parse_path, parse_yaml, to_json_value, to_raw_value,
+    parse_file, parse_json, parse_path, parse_yaml, take_by_path, to_raw_value, write_json_pretty,
 };
 use crate::renderer::{self, TreeStyle};
 use crate::tui;
@@ -122,7 +122,7 @@ fn run_root(cli: Cli) -> Result<i32> {
 
     let mut base_path = Vec::new();
     if let Some(path_query) = &path_query {
-        node = get_by_path(&node, path_query)?.clone();
+        node = take_by_path(node, path_query)?;
         base_path = parse_path(path_query)?;
     }
 
@@ -146,7 +146,7 @@ fn run_root(cli: Cli) -> Result<i32> {
 
     write_stdout(|out| {
         if cli.json {
-            serde_json::to_writer_pretty(&mut *out, &to_json_value(&node))?;
+            write_json_pretty(&mut *out, &node)?;
             writeln!(out)
         } else {
             renderer::render(out, &node, style, cli.types)

@@ -804,16 +804,31 @@ impl TreeApp {
     }
 }
 
-#[derive(Debug, Clone)]
-struct DiffRow {
-    left: String,
-    right: String,
+/// A row of the diff view. Its text is formatted only when it is drawn, so
+/// opening a large diff does not format every row up front.
+#[derive(Debug, Clone, Copy)]
+struct DiffRow<'a> {
+    left: Option<&'a YamNode>,
+    right: Option<&'a YamNode>,
     diff_type: DiffType,
-    changed: bool,
 }
 
-struct DiffApp {
-    rows: Vec<DiffRow>,
+impl DiffRow<'_> {
+    fn changed(&self) -> bool {
+        self.diff_type != DiffType::Unchanged
+    }
+
+    fn left_text(&self) -> String {
+        self.left.map(format_diff_node).unwrap_or_default()
+    }
+
+    fn right_text(&self) -> String {
+        self.right.map(format_diff_node).unwrap_or_default()
+    }
+}
+
+struct DiffApp<'a> {
+    rows: Vec<DiffRow<'a>>,
     left_file: String,
     right_file: String,
     summary: String,
@@ -823,8 +838,8 @@ struct DiffApp {
     status: String,
 }
 
-impl DiffApp {
-    fn new(result: &DiffResult<'_>) -> Self {
+impl<'a> DiffApp<'a> {
+    fn new(result: &DiffResult<'a>) -> Self {
         let mut rows = Vec::new();
         if let Some(root) = &result.root {
             collect_diff_rows(root, &mut rows);
@@ -1006,8 +1021,11 @@ impl DiffApp {
                 DiffType::Modified => "~ ",
                 _ => "  ",
             };
-            let left = truncate(&format!("{left_prefix}{}", row.left), pane as usize);
-            let right = truncate(&format!("{right_prefix}{}", row.right), pane as usize);
+            let left = truncate(&format!("{left_prefix}{}", row.left_text()), pane as usize);
+            let right = truncate(
+                &format!("{right_prefix}{}", row.right_text()),
+                pane as usize,
+            );
             queue!(
                 stdout,
                 Print(pad(&left, pane as usize)),
@@ -1060,7 +1078,7 @@ impl DiffApp {
 
     fn next_diff(&mut self) {
         for idx in self.cursor.saturating_add(1)..self.rows.len() {
-            if self.rows[idx].changed {
+            if self.rows[idx].changed() {
                 self.cursor = idx;
                 self.adjust_offset();
                 return;
@@ -1071,7 +1089,7 @@ impl DiffApp {
 
     fn prev_diff(&mut self) {
         for idx in (0..self.cursor).rev() {
-            if self.rows[idx].changed {
+            if self.rows[idx].changed() {
                 self.cursor = idx;
                 self.adjust_offset();
                 return;
@@ -1104,7 +1122,7 @@ impl DiffApp {
     }
 }
 
-fn collect_diff_rows(node: &DiffNode<'_>, rows: &mut Vec<DiffRow>) {
+fn collect_diff_rows<'a>(node: &DiffNode<'a>, rows: &mut Vec<DiffRow<'a>>) {
     let is_document = node
         .left
         .is_some_and(|node| node.kind == NodeKind::Document)
@@ -1113,10 +1131,9 @@ fn collect_diff_rows(node: &DiffNode<'_>, rows: &mut Vec<DiffRow>) {
             .is_some_and(|node| node.kind == NodeKind::Document);
     if !is_document {
         rows.push(DiffRow {
-            left: node.left.map(format_diff_node).unwrap_or_default(),
-            right: node.right.map(format_diff_node).unwrap_or_default(),
+            left: node.left,
+            right: node.right,
             diff_type: node.diff_type,
-            changed: node.diff_type != DiffType::Unchanged,
         });
     }
     for child in &node.children {
@@ -1357,6 +1374,42 @@ mod tests {
         press(&mut app, KeyCode::Char('n'));
         assert_eq!(app.current_id(), Some(4));
         assert_eq!(app.display_path(4), "$.items.0.name");
+    }
+
+    #[test]
+    fn diff_rows_format_their_sides_and_step_through_changes() {
+        let left = parse_yaml_str("a: 1\nb: [x]\nc: same\n").unwrap();
+        let right = parse_yaml_str("a: 2\nb: [x, y]\nc: same\nd: {e: 1}\n").unwrap();
+        let result = crate::diff::compare(&left, &right);
+        let mut app = DiffApp::new(&result);
+        let rows: Vec<(String, String, DiffType)> = app
+            .rows
+            .iter()
+            .map(|row| (row.left_text(), row.right_text(), row.diff_type))
+            .collect();
+        let row = |l: &str, r: &str, t| (l.to_string(), r.to_string(), t);
+        assert_eq!(
+            rows,
+            [
+                row("{...}", "{...}", DiffType::Modified),
+                row("  a: 1", "  a: 2", DiffType::Modified),
+                row("  b:", "  b:", DiffType::Modified),
+                row("    [0]: x", "    [0]: x", DiffType::Unchanged),
+                row("", "    [1]: y", DiffType::Added),
+                row("  c: same", "  c: same", DiffType::Unchanged),
+                row("", "  d:", DiffType::Added),
+            ]
+        );
+
+        let changed: Vec<usize> = std::iter::from_fn(|| {
+            let before = app.cursor;
+            app.next_diff();
+            (app.cursor != before).then_some(app.cursor)
+        })
+        .collect();
+        assert_eq!(changed, [1, 2, 4, 6]);
+        app.prev_diff();
+        assert_eq!(app.cursor, 4);
     }
 
     #[test]
